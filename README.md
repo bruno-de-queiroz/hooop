@@ -1,9 +1,3 @@
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/6e7dfedd-ff80-4966-80f3-ed194fef9964" autoplay loop muted playsinline width="900">
-    <img src="docs/logo.svg" alt="hooop" width="224" height="88">
-  </video>
-</p>
-
 # hooop
 
 [![CI](https://github.com/bruno-de-queiroz/hooop/actions/workflows/ci.yml/badge.svg)](https://github.com/bruno-de-queiroz/hooop/actions/workflows/ci.yml)
