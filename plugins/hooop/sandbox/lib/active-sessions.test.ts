@@ -3291,6 +3291,47 @@ describe("stderr parser: auth failure detection", () => {
   });
 });
 
+describe("stdout parser: hook-blocked prompt detection", () => {
+  it("emits activeSessionsBus.error with kind=hook-blocked when a hook vetoes the prompt", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x" });
+    const errors: any[] = [];
+    mod.activeSessionsBus.on("error", (p) => errors.push(p));
+
+    (shared.children[0].stdout as any).pushLine({
+      type: "system",
+      subtype: "informational",
+      session_id: sessionId,
+      level: "warning",
+      preventContinuation: true,
+      content:
+        "UserPromptSubmit operation blocked by hook:\n[some hook command]: claude-mem worker unreachable for 4 consecutive hooks.\n\n\nOriginal prompt: start the preview again",
+    });
+    await flush();
+
+    const blocked = errors.find((e) => e.kind === "hook-blocked");
+    expect(blocked).toBeDefined();
+    expect(blocked.sessionId).toBe(sessionId);
+    expect(blocked.message).toBe("claude-mem worker unreachable for 4 consecutive hooks.");
+  });
+
+  it("does NOT fire for an informational frame that isn't blocking (no preventContinuation)", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x" });
+    const errors: any[] = [];
+    mod.activeSessionsBus.on("error", (p) => errors.push(p));
+
+    (shared.children[0].stdout as any).pushLine({
+      type: "system",
+      subtype: "informational",
+      session_id: sessionId,
+      level: "suggestion",
+      content: "just a heads up, nothing was blocked",
+    });
+    await flush();
+
+    expect(errors.filter((e) => e.kind === "hook-blocked")).toHaveLength(0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Plan-review durability: a synthetic plan review awaiting the human's decision
 // must survive a sandbox restart (checkpoint) and a dormant→awake revive, and

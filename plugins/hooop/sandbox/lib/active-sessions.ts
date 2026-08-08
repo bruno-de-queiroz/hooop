@@ -2442,6 +2442,17 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
   childEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(envWindow);
   childEnv.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(compactPct);
 
+  // claude-mem's UserPromptSubmit hook is fail-closed by design: once its
+  // worker has been unreachable for CLAUDE_MEM_HOOK_FAIL_LOUD_THRESHOLD
+  // consecutive hooks (default 3, see docker-compose.yml's tini comment for
+  // one way the worker ends up a zombie), it exits 2 and Claude Code drops
+  // the prompt entirely — the model never sees it, with no retry and no
+  // visible error (see the "hook-blocked" detection below, which is our
+  // side's substitute for that visibility). A memory plugin being down must
+  // never take a whole session down with it, so this is set high enough that
+  // the threshold practically never trips.
+  childEnv.CLAUDE_MEM_HOOK_FAIL_LOUD_THRESHOLD = "1000000";
+
   // The claude process itself is intentionally NOT Landlock-wrapped: it needs
   // read-WRITE ~/.claude (OAuth refresh, transcripts under ~/.claude/projects)
   // plus a wide read surface, and any allow-list broad enough to keep it
@@ -2894,6 +2905,26 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
             // (unrecognized model) must not wipe a window we already knew.
             ...(win != null ? { contextWindow: win } : {}),
           };
+        }
+
+        // A hook (any plugin's, not just claude-mem's) vetoed this prompt.
+        // Claude Code emits a `system`/`informational` frame with
+        // `preventContinuation: true` and drops the prompt silently — the
+        // model never sees it and nothing else in this stream says so. Left
+        // unsurfaced, the host just watches their message sit there forever
+        // with no reply and no error (see #1218 in session
+        // fd3986f1-99f1-4feb-9a0b-86634f75a066's transcript for the case that
+        // prompted this). Surface it the same way an auth failure is
+        // surfaced below: a bus "error" the dashboard turns into a banner.
+        if (frame.type === "system" && frame.subtype === "informational" && frame.preventContinuation === true) {
+          const content = typeof frame.content === "string" ? frame.content : "a plugin hook";
+          const reason = (content.split(/\]:\s*/).pop() ?? content).split("\n\nOriginal prompt:")[0].trim();
+          activeSessionsBus.emit("error", {
+            sessionId,
+            kind: "hook-blocked",
+            message: reason || "A plugin hook blocked your message before Claude saw it.",
+          });
+          log.warn("active-sessions", "prompt blocked by hook", { sessionId, reason });
         }
 
         if (frame.type === "result") {

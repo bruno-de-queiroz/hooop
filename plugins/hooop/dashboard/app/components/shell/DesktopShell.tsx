@@ -33,6 +33,7 @@ import { FilesUIProvider, useFilesUI, type RailView } from "@/app/context/FilesU
 import { PreviewUIProvider, usePreviewUI } from "@/app/context/PreviewUIProvider";
 import { HooopMark } from "./HooopLogo";
 import { AuthBanner } from "../AuthBanner";
+import { HookBlockedBanner } from "../HookBlockedBanner";
 
 // "Details" section — the former Summary + Skills + Sub-agents rail, now
 // consolidated under one view. Shared by the desktop rail and the mobile overlay.
@@ -288,6 +289,7 @@ function ShellLayout({ isPeer, port }: { isPeer: boolean; port: string }) {
 
           <CenterPane>
             <AuthBanner />
+            <HookBlockedBanner />
             <ShellCenterPane />
           </CenterPane>
 
