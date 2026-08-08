@@ -159,6 +159,7 @@ COPY --from=builder --chown=node:node /build/dashboard/server.mjs ./server.mjs
 COPY --from=builder --chown=node:node /build/dashboard/auto-share.mjs ./auto-share.mjs
 COPY --from=builder --chown=node:node /build/dashboard/tunnel-reachability.mjs ./tunnel-reachability.mjs
 COPY --from=builder --chown=node:node /build/dashboard/quick-tunnel-url.mjs ./quick-tunnel-url.mjs
+COPY --from=builder --chown=node:node /build/dashboard/tunnel-start.mjs ./tunnel-start.mjs
 COPY --from=builder --chown=node:node /build/dashboard/preview-driver.mjs ./preview-driver.mjs
 COPY --from=builder --chown=node:node /build/dashboard/node_modules/ws ./node_modules/ws
 

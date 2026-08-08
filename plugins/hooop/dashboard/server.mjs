@@ -209,6 +209,33 @@ const tunnel = {
 };
 const TUNNEL_START_TIMEOUT_MS = 20_000;
 
+// A registration failure is usually transient, so one spawn is not an answer.
+// The dominant failure mode (a resolver that sinkholes api.trycloudflare.com)
+// fails in well under a second, so the retries cost nothing in the common case;
+// the deadline is what bounds the case where cloudflared hangs instead, since
+// each attempt can burn TUNNEL_START_TIMEOUT_MS on its own.
+const TUNNEL_START_ATTEMPTS = Math.max(1, Number(process.env.HOOOP_TUNNEL_ATTEMPTS) || 3);
+const TUNNEL_START_DEADLINE_MS = Math.max(
+  TUNNEL_START_TIMEOUT_MS,
+  Number(process.env.HOOOP_TUNNEL_DEADLINE_MS) || 45_000,
+);
+const TUNNEL_RETRY_BASE_MS = 1_000;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref?.());
+
+// Shared shape for both tunnel kinds: same flags, same retry policy, one place
+// that explains why either is what it is.
+const withTunnelRetry = (attempt, label, aborted) => startTunnelWithRetry({
+  attempt,
+  attempts: TUNNEL_START_ATTEMPTS,
+  deadlineMs: TUNNEL_START_DEADLINE_MS,
+  backoffMs: (n) => TUNNEL_RETRY_BASE_MS * n,
+  sleep,
+  aborted,
+  label,
+  log,
+});
+
 /**
  * Which of cloudflared's lines are worth the front log.
  *
@@ -254,13 +281,14 @@ function pipeCloudflaredLog(proc, label) {
 function spawnQuickTunnel(localUrl, onExit, label = localUrl) {
   return new Promise((resolve) => {
     let settled = false;
+    let reported = false; // a hostname was parsed, so this tunnel really existed
     let proc;
     try {
-      proc = spawn("cloudflared", ["tunnel", "--no-autoupdate", "--url", localUrl], {
+      proc = spawn("cloudflared", cloudflaredArgs(localUrl), {
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (e) {
-      return resolve({ error: `could not start cloudflared: ${e.message}` });
+      return resolve({ error: `could not start cloudflared: ${e.message}`, fatal: true });
     }
     pipeCloudflaredLog(proc, label);
 
@@ -273,15 +301,20 @@ function spawnQuickTunnel(localUrl, onExit, label = localUrl) {
 
     const onData = (chunk) => {
       const url = parseQuickTunnelUrl(chunk.toString());
-      if (url) finish({ proc, url });
+      if (url) { reported = true; finish({ proc, url }); }
     };
     // cloudflared prints its URL banner to stderr, not stdout.
     proc.stdout.on("data", onData);
     proc.stderr.on("data", onData);
-    proc.on("error", (e) => finish({ error: `could not start cloudflared: ${e.message}` }));
+    proc.on("error", (e) =>
+      finish({ error: `could not start cloudflared: ${e.message}`, fatal: true }));
     proc.on("exit", (code) => {
       finish({ error: `cloudflared exited (${code}) before reporting a hostname` });
-      if (onExit) onExit(code);
+      // onExit means "the tunnel died on its own", and the caller uses it to tear
+      // down state keyed to a hostname. An attempt that never got that far has no
+      // such state, and firing here would have the caller clean up a live tunnel
+      // belonging to whoever retried after it.
+      if (reported && onExit) onExit(code);
     });
 
     const timer = setTimeout(() => {
@@ -289,6 +322,11 @@ function spawnQuickTunnel(localUrl, onExit, label = localUrl) {
       finish({ error: "timed out waiting for tunnel hostname" });
     }, TUNNEL_START_TIMEOUT_MS);
   });
+}
+
+/** spawnQuickTunnel, but a lost coin-flip is not the answer. See tunnel-start.mjs. */
+function spawnQuickTunnelWithRetry(localUrl, onExit, label = localUrl) {
+  return withTunnelRetry(() => spawnQuickTunnel(localUrl, onExit, label), label);
 }
 
 function tunnelStatus() {
@@ -299,9 +337,99 @@ function resolveTunnelWaiters() {
   for (const w of tunnel.waiters.splice(0)) w(snap);
 }
 
-function startTunnel() {
+/**
+ * One spawn of the session tunnel.
+ *
+ * Resolves `{}` once cloudflared reports a hostname, or `{ error }` when this
+ * attempt is spent. Deliberately does NOT publish a failure to `tunnel.status`
+ * or wake the waiters: whether a failed attempt is the end of the story belongs
+ * to startTunnel, and a transient one must never reach the UI.
+ *
+ * A death AFTER a hostname was reported is a different event, and this function
+ * keeps owning it — that tunnel vanished out from under live shares, so the
+ * handler below clears them. Retrying is only ever for the pre-hostname window.
+ */
+function attemptSessionTunnel() {
+  return new Promise((resolve) => {
+    let settled = false;
+    let reported = false;
+    const finish = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+
+    let proc;
+    try {
+      proc = spawn("cloudflared", cloudflaredArgs(`http://127.0.0.1:${PUBLIC_PORT}`), {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e) {
+      return finish({ error: `could not start cloudflared: ${e.message}`, fatal: true });
+    }
+    tunnel.proc = proc;
+    // The session tunnel used to be the ONE cloudflared this process never
+    // logged (spawnQuickTunnel has always piped its previews). So when it failed,
+    // the front log showed a hostname and an exit code and nothing that said why —
+    // which is exactly how a control-plane error got mistaken for a live tunnel.
+    pipeCloudflaredLog(proc, "session");
+
+    const onData = (chunk) => {
+      if (reported) return;
+      const url = parseQuickTunnelUrl(chunk.toString());
+      if (!url) return;
+      reported = true;
+      tunnel.url = url;
+      tunnel.status = "running";
+      log("tunnel up:", tunnel.url);
+      resolveTunnelWaiters();
+      finish({});
+    };
+    proc.stdout.on("data", onData);
+    proc.stderr.on("data", onData); // cloudflared prints the URL banner to stderr
+
+    proc.on("exit", (code) => {
+      log("cloudflared exited", code);
+      // False once a later attempt (or a stop) has taken tunnel.proc, which makes
+      // this the corpse of one we already gave up on: it may no longer speak for
+      // the tunnel's state.
+      const mine = tunnel.proc === proc;
+      if (mine) tunnel.proc = null;
+      // Settling the ATTEMPT is unconditional even so. stopTunnel() clears
+      // tunnel.proc and then kills us, and if that exit returned early here the
+      // start would sit waiting on a timer with nothing left to wait for.
+      if (!reported) {
+        return finish({ error: `cloudflared exited (${code}) before reporting a hostname` });
+      }
+      if (!mine) return;
+      if (tunnel.status === "stopped") return; // intentional stop; stopTunnel() did the cleanup
+      // Unexpected death of a tunnel that WAS live — shares are bound to a
+      // hostname that no longer routes, so clear them now.
+      tunnel.status = "error";
+      tunnel.error = "tunnel process exited";
+      tunnel.url = null;
+      void revokeAllSharesInSandbox();
+      resolveTunnelWaiters();
+    });
+    proc.on("error", (e) => {
+      log("cloudflared spawn error", e.message);
+      if (tunnel.proc === proc) tunnel.proc = null;
+      finish({ error: `could not start cloudflared: ${e.message}`, fatal: true });
+    });
+
+    const timer = setTimeout(() => {
+      // Leave tunnel.proc set: the exit this kill provokes should still be seen
+      // as this attempt's, so it can't be mistaken for a later one's.
+      try { proc.kill("SIGTERM"); } catch { /* already gone */ }
+      finish({ error: "timed out waiting for tunnel hostname" });
+    }, TUNNEL_START_TIMEOUT_MS);
+  });
+}
+
+async function startTunnel() {
   // Idempotent: a running/starting tunnel just yields its current state.
-  if (tunnel.status === "running") return Promise.resolve(tunnelStatus());
+  if (tunnel.status === "running") return tunnelStatus();
   if (tunnel.status === "starting") {
     return new Promise((resolve) => tunnel.waiters.push(resolve));
   }
@@ -309,69 +437,21 @@ function startTunnel() {
   tunnel.url = null;
   tunnel.error = null;
 
-  const proc = spawn(
-    "cloudflared",
-    ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${PUBLIC_PORT}`],
-    { stdio: ["ignore", "pipe", "pipe"] },
+  // "Abort" here is stopTunnel() landing mid-start: the host asked for no tunnel,
+  // so leave "stopped" standing rather than retrying into it. attemptSessionTunnel
+  // publishes success itself, so only the give-up path is left to report.
+  const last = await withTunnelRetry(
+    attemptSessionTunnel,
+    "session",
+    () => tunnel.status !== "starting",
   );
-  tunnel.proc = proc;
-  // The session tunnel used to be the ONE cloudflared this process never
-  // logged (spawnQuickTunnel has always piped its previews). So when it failed,
-  // the front log showed a hostname and an exit code and nothing that said why —
-  // which is exactly how a control-plane error got mistaken for a live tunnel.
-  pipeCloudflaredLog(proc, "session");
+  if (!last.error || last.aborted) return tunnelStatus();
 
-  const onData = (chunk) => {
-    if (tunnel.url) return;
-    const url = parseQuickTunnelUrl(chunk.toString());
-    if (url) {
-      tunnel.url = url;
-      tunnel.status = "running";
-      log("tunnel up:", tunnel.url);
-      resolveTunnelWaiters();
-    }
-  };
-  proc.stdout.on("data", onData);
-  proc.stderr.on("data", onData); // cloudflared prints the URL banner to stderr
-  proc.on("exit", (code) => {
-    log("cloudflared exited", code);
-    if (tunnel.proc === proc) {
-      tunnel.proc = null;
-      if (tunnel.status !== "stopped") {
-        // Unexpected death (crash/network) — an intentional stop already set
-        // status "stopped" and revoked shares in stopTunnel(). Here the tunnel
-        // vanished out from under live shares, so clear them now.
-        tunnel.status = "error";
-        tunnel.error = tunnel.url ? "tunnel process exited" : "tunnel failed to start";
-        tunnel.url = null;
-        void revokeAllSharesInSandbox();
-        resolveTunnelWaiters();
-      }
-    }
-  });
-  proc.on("error", (e) => {
-    log("cloudflared spawn error", e.message);
-    if (tunnel.proc === proc) {
-      tunnel.proc = null;
-      tunnel.status = "error";
-      tunnel.error = `could not start cloudflared: ${e.message}`;
-      tunnel.url = null;
-      resolveTunnelWaiters();
-    }
-  });
-
-  return new Promise((resolve) => {
-    tunnel.waiters.push(resolve);
-    setTimeout(() => {
-      if (tunnel.status === "starting") {
-        tunnel.status = "error";
-        tunnel.error = "timed out waiting for tunnel hostname";
-        try { tunnel.proc?.kill("SIGTERM"); } catch {}
-        tunnel.proc = null;
-        resolveTunnelWaiters();
-      }
-    }, TUNNEL_START_TIMEOUT_MS);
-  });
+  tunnel.status = "error";
+  tunnel.error = last.error;
+  tunnel.url = null;
+  resolveTunnelWaiters();
+  return tunnelStatus();
 }
 
 function stopTunnel() {
@@ -1185,7 +1265,7 @@ async function startPreviewTunnel(slot) {
   const existing = previewTunnels.get(slot);
   if (existing) return { url: existing.url, reachable: !!existing.reachable };
 
-  const result = await spawnQuickTunnel(
+  const result = await spawnQuickTunnelWithRetry(
     `http://127.0.0.1:${PREVIEW_PORT_BASE + slot - 1}`,
     () => {
       // The tunnel died on its own. Drop the record so the next share re-creates

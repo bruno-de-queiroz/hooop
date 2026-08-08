@@ -224,6 +224,29 @@ services:
     extra_hosts:
       - "host.docker.internal:${HOOOP_HOST_GATEWAY:-host-gateway}"
 
+    # Upstream resolvers for this container, pinned away from the host's.
+    #
+    # This is the only container that runs cloudflared, and a quick tunnel starts
+    # with one HTTPS call to api.trycloudflare.com. That name is on most corporate
+    # DNS blocklists (it is genuinely abused for phishing and C2), so a filtering
+    # resolver answers it with 0.0.0.0 or NXDOMAIN. Under WSL2 every container
+    # inherits the host's resolver — WSL proxies DNS to Windows via 10.255.255.254
+    # — so the filter applies to hooop too, and cloudflared dies with
+    # `dial tcp 0.0.0.0:443: connect: connection refused` (0.0.0.0 dials loopback,
+    # hence "refused" rather than a timeout). macOS never sees this: no such proxy,
+    # usually no such filter. Pinning public resolvers here takes the host resolver
+    # out of the path for the one container that cannot tolerate it.
+    #
+    # Two different operators on purpose, so blocking one does not block both.
+    # Only the UPSTREAM changes: compose service names still resolve, because
+    # Docker's embedded resolver at 127.0.0.11 answers those itself and forwards
+    # only what it cannot. Nothing here needs internal names — the sandbox is a
+    # unix socket and the runners are service names — so there is nothing to lose.
+    # Override HOOOP_DNS if your network requires its own resolver.
+    dns:
+      - ${HOOOP_DNS:-1.1.1.1}
+      - ${HOOOP_DNS_FALLBACK:-8.8.8.8}
+
     # `default` keeps the existing connectivity; the three preview networks are
     # what let the front process reach each runner by name. agent-sandbox is on
     # NONE of them, so a preview has no route to the trusted container.
