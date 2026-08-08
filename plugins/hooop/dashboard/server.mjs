@@ -30,6 +30,7 @@ import { readFileSync } from "node:fs";
 import { WebSocketServer } from "ws";
 import { autoShareSweep as reconcileAutoShare } from "./auto-share.mjs";
 import { waitForTunnelReachable } from "./tunnel-reachability.mjs";
+import { parseQuickTunnelUrl } from "./quick-tunnel-url.mjs";
 import {
   driverScriptFor, DRIVER_SCRIPT_PATH, DRIVER_SOCKET_PATH, SCRIPT_TAG,
   injectScript, isInjectableHtml, isDocumentRequest, createDriverRegistry,
@@ -206,7 +207,6 @@ const tunnel = {
   error: null,
   waiters: [], // resolvers awaiting the URL while a start is in progress
 };
-const TUNNEL_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
 const TUNNEL_START_TIMEOUT_MS = 20_000;
 
 /**
@@ -272,8 +272,8 @@ function spawnQuickTunnel(localUrl, onExit, label = localUrl) {
     };
 
     const onData = (chunk) => {
-      const m = chunk.toString().match(TUNNEL_URL_RE);
-      if (m) finish({ proc, url: m[0] });
+      const url = parseQuickTunnelUrl(chunk.toString());
+      if (url) finish({ proc, url });
     };
     // cloudflared prints its URL banner to stderr, not stdout.
     proc.stdout.on("data", onData);
@@ -315,12 +315,17 @@ function startTunnel() {
     { stdio: ["ignore", "pipe", "pipe"] },
   );
   tunnel.proc = proc;
+  // The session tunnel used to be the ONE cloudflared this process never
+  // logged (spawnQuickTunnel has always piped its previews). So when it failed,
+  // the front log showed a hostname and an exit code and nothing that said why —
+  // which is exactly how a control-plane error got mistaken for a live tunnel.
+  pipeCloudflaredLog(proc, "session");
 
   const onData = (chunk) => {
     if (tunnel.url) return;
-    const m = chunk.toString().match(TUNNEL_URL_RE);
-    if (m) {
-      tunnel.url = m[0];
+    const url = parseQuickTunnelUrl(chunk.toString());
+    if (url) {
+      tunnel.url = url;
       tunnel.status = "running";
       log("tunnel up:", tunnel.url);
       resolveTunnelWaiters();
