@@ -326,6 +326,15 @@ describe("stdout parser: synthetic frame ingestion", () => {
 
   it("ingests a synthetic user frame (/compact) as kind=compaction with the summary text", async () => {
     await mod.startNewConversation({ cwd: "/x" });
+    // The boundary always precedes the summary in the real stream, and it is
+    // what identifies the summary as one. Verified live: compact_boundary,
+    // then the isSynthetic user frame, then result.
+    (shared.children[0].stdout as any).pushLine({
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: { trigger: "manual", post_tokens: 2094 },
+      session_id: "compact-1",
+    });
     (shared.children[0].stdout as any).pushLine({
       type: "user",
       isSynthetic: true,
@@ -339,6 +348,60 @@ describe("stdout parser: synthetic frame ingestion", () => {
     const payload = JSON.parse(ingestEventLineMock.mock.calls[0][0]);
     expect(payload.ctx.kind).toBe("compaction");
     expect(payload.ctx.last_assistant_message).toContain("This session is being continued");
+  });
+
+  // The bug this gate exists for. Reading an oversized image makes claude inject
+  // a downscale notice as a synthetic USER frame — same isSynthetic marking as a
+  // compaction summary, no compaction anywhere near it. One design session read
+  // 22 screenshots and collected 10 "Context compacted" markers having never
+  // compacted once. Fixture text is verbatim from a captured stream.
+  it("does not mistake the image-downscale notice for a compaction", async () => {
+    await mod.startNewConversation({ cwd: "/x" });
+    (shared.children[0].stdout as any).pushLine({
+      type: "user",
+      isSynthetic: true,
+      message: {
+        content: [{
+          type: "text",
+          text: "[Image: original 2560x2000, displayed at 2000x1563. "
+            + "Multiply coordinates by 1.28 to map to original image.]",
+        }],
+      },
+      session_id: "img-1",
+    });
+    await flush();
+
+    expect(ingestEventLineMock).not.toHaveBeenCalled();
+  });
+
+  // One boundary means one summary. An oversized image read later in the SAME
+  // auto-compacted turn must not inherit the tag the boundary armed.
+  it("arms the compaction tag for exactly one synthetic frame", async () => {
+    await mod.startNewConversation({ cwd: "/x" });
+    const child = shared.children[0] as any;
+    child.stdout.pushLine({
+      type: "system",
+      subtype: "compact_boundary",
+      compact_metadata: { trigger: "auto", post_tokens: 2094 },
+      session_id: "compact-2",
+    });
+    child.stdout.pushLine({
+      type: "user",
+      isSynthetic: true,
+      isReplay: false,
+      message: { content: "This session is being continued..." },
+      session_id: "compact-2",
+    });
+    child.stdout.pushLine({
+      type: "user",
+      isSynthetic: true,
+      message: { content: [{ type: "text", text: "[Image: original 2192x1372, displayed at 2000x1252.]" }] },
+      session_id: "compact-2",
+    });
+    await flush();
+
+    expect(ingestEventLineMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(ingestEventLineMock.mock.calls[0][0]).ctx.kind).toBe("compaction");
   });
 
   // Claude runs /compact and /cost WITHOUT emitting a Stop hook, so
@@ -362,6 +425,35 @@ describe("stdout parser: synthetic frame ingestion", () => {
     });
     await flush();
     expect(mod.getActiveSession("compact-turn")?.turnActive).toBe(false);
+  });
+
+  // Note the test above ships NO compact_boundary, so its summary produces no
+  // row — and the indicator still clears. That is deliberate: the compaction
+  // gate decides whether a frame is worth a transcript row, never whether a
+  // pending native command has finished. Tying the two together would let a
+  // missing boundary strand every viewer on "thinking" forever, which is a far
+  // worse failure than the stray marker the gate removes.
+  it("ends a native command's turn on a synthetic frame that earns no row", async () => {
+    await mod.startNewConversation({ cwd: "/x" });
+    const child = shared.children[shared.children.length - 1];
+    child.stdout.pushLine({ type: "system", session_id: "rowless-turn" });
+    await flush();
+    await mod.writeUserTurn("rowless-turn", "/compact");
+    expect(mod.getActiveSession("rowless-turn")?.turnActive).toBe(true);
+
+    child.stdout.pushLine({
+      type: "user",
+      isSynthetic: true,
+      message: { content: [{ type: "text", text: "[Image: original 2560x2000, displayed at 2000x1563.]" }] },
+      session_id: "rowless-turn",
+    });
+    await flush();
+
+    // writeUserTurn ingests the prompt itself, so assert on the transcript row
+    // specifically: no Stop was synthesized for that frame.
+    const hooks = ingestEventLineMock.mock.calls.map((c: any[]) => JSON.parse(c[0]).hook);
+    expect(hooks).toEqual(["UserPromptSubmit"]);
+    expect(mod.getActiveSession("rowless-turn")?.turnActive).toBe(false);
   });
 
   // The counterpart, and the reason the clear is keyed on "we dispatched a

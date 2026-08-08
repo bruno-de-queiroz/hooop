@@ -278,6 +278,21 @@ interface LiveSlot {
   // pre-compaction summarization read and would otherwise slam the meter back to
   // ~100% right after a compact — doesn't clobber that figure. Reset each turn.
   compactedThisTurn?: boolean;
+  // A compact_boundary frame just landed and its summary has not arrived yet.
+  //
+  // This is what makes a synthetic USER frame a compaction rather than merely
+  // synthetic. Claude marks isSynthetic on ANY message the harness injects that
+  // the user did not type, and a compaction summary is only one of them — the
+  // image-downscale notice ("[Image: original 2560x2000, displayed at ...]") is
+  // another, and it fires on every oversized image a session reads. Treating
+  // isSynthetic alone as "this is a compaction" put ten "Context compacted"
+  // markers in one design session that never compacted once.
+  //
+  // Ordering makes the gate safe: claude emits compact_boundary BEFORE the
+  // summary (verified live — boundary, then the isSynthetic user frame, then
+  // result), for manual and auto alike. One-shot rather than turn-scoped so a
+  // big image read LATER in an auto-compacted turn can't inherit the tag.
+  compactSummaryPending?: boolean;
   // This turn was launched in plan mode (`/plan`, or a reject-revise turn).
   planTurnActive?: boolean;
   // A native passthrough command (`/compact`, `/cost`) we dispatched bare is
@@ -2736,6 +2751,8 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
         //   - /compact          → synthetic USER frame (isSynthetic: true,
         //     isReplay: false) whose `content` IS the new compacted summary.
         //     Tag as kind=compaction; the renderer shows a collapsed notice.
+        //     Gated on the compact_boundary that precedes it — isSynthetic marks
+        //     every harness-injected message, so it alone does not mean this.
         const synthCtx = (() => {
           if (
             frame.type === "assistant"
@@ -2780,6 +2797,18 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
             && frame.isReplay !== true
             && frame.message
           ) {
+            // isSynthetic marks EVERY harness-injected message, not just a
+            // compaction summary, so the boundary flag is what tells them apart.
+            // Without it the image-downscale notice claude injects after reading
+            // an oversized image reads as a compaction — see compactSummaryPending.
+            if (!slot.compactSummaryPending) {
+              // Some other piece of context plumbing addressed to the model. It
+              // is not something anyone said, so it earns no transcript row —
+              // but it IS a synthetic frame, and saying so still ends a native
+              // passthrough command's turn below.
+              return { kind: null, text: "", error: null };
+            }
+            slot.compactSummaryPending = false;
             // The summary lives in message.content as a string (compact) or
             // as an array of content blocks (defensive parse).
             const c = frame.message.content;
@@ -2797,21 +2826,29 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
           return null;
         })();
         if (synthCtx) {
-          try {
-            ingestEventLine(JSON.stringify({
-              ts: new Date().toISOString(),
-              hook: "Stop",
-              ctx: {
-                session_id: frame.session_id ?? sessionId,
-                hook_event_name: "Stop",
-                last_assistant_message: synthCtx.text,
-                synthetic: true,
-                kind: synthCtx.kind,
-                ...(synthCtx.error ? { error: synthCtx.error } : {}),
-              },
-            }));
-          } catch (err) {
-            log.warn("active-sessions", "synthetic ingest failed", { err });
+          // A row is optional; being a synthetic frame is not. Plumbing claude
+          // injected for its own benefit (the image-downscale notice) has no
+          // kind and produces no row, yet must still reach the turn-end check —
+          // otherwise a /compact whose boundary went missing would leave every
+          // viewer's "thinking" indicator spinning forever, which is a worse
+          // failure than the stray marker this gate removes.
+          if (synthCtx.kind) {
+            try {
+              ingestEventLine(JSON.stringify({
+                ts: new Date().toISOString(),
+                hook: "Stop",
+                ctx: {
+                  session_id: frame.session_id ?? sessionId,
+                  hook_event_name: "Stop",
+                  last_assistant_message: synthCtx.text,
+                  synthetic: true,
+                  kind: synthCtx.kind,
+                  ...(synthCtx.error ? { error: synthCtx.error } : {}),
+                },
+              }));
+            } catch (err) {
+              log.warn("active-sessions", "synthetic ingest failed", { err });
+            }
           }
           // This frame IS the end of a native passthrough command's turn: claude
           // emits no Stop hook for /compact or /cost, so server.ts's /ingest —
@@ -2874,6 +2911,8 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
           // post-boundary assistant frames refresh lastAssistantUsage to the
           // true (growing) size and correctly win over this baseline.
           slot.compactedThisTurn = true;
+          // Arm the synthetic-frame branch: the very next one is the summary.
+          slot.compactSummaryPending = true;
           slot.lastAssistantUsage = undefined;
           slot.meta.lastSeenAt = Date.now();
         }
