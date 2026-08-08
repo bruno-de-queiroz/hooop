@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import type { EventRow } from "@/lib/sandbox-types";
 import { ShellTranscript } from "./ShellTranscript";
 
@@ -662,15 +662,27 @@ describe("scroll-down bubble", () => {
   });
 
   it("appears once scrolled away from the bottom, and returns to the bottom on click", () => {
-    renderTranscript([ev({ id: 1, hook_type: "Chat", author: "host", text: "hi" })]);
-    const el = screen.getByTestId("shell-transcript");
-    scrollUp(el);
+    vi.useFakeTimers();
+    try {
+      renderTranscript([ev({ id: 1, hook_type: "Chat", author: "host", text: "hi" })]);
+      const el = screen.getByTestId("shell-transcript");
+      scrollUp(el);
 
-    const button = screen.getByRole("button", { name: /scroll to the latest message/i });
-    fireEvent.click(button);
+      const button = screen.getByRole("button", { name: /scroll to the latest message/i });
+      fireEvent.click(button);
 
-    expect(el.scrollTop).toBe(1000);
-    expect(screen.queryByRole("button", { name: /scroll to the latest message/i })).toBeNull();
+      expect(el.scrollTop).toBe(1000);
+      // It stays mounted (playing the exit animation) rather than vanishing
+      // the instant it's clicked.
+      expect(screen.queryByRole("button", { name: /scroll to the latest message/i })).not.toBeNull();
+
+      act(() => {
+        vi.advanceTimersByTime(200);
+      });
+      expect(screen.queryByRole("button", { name: /scroll to the latest message/i })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not force-scroll a new message while the reader is up scrolled reading history", () => {

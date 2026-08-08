@@ -559,6 +559,11 @@ const ToolCardBody = memo(function ToolCardBody({ pre, post }: { pre: EventRow; 
   );
 });
 
+// Matches the `modal-out` keyframe duration in tailwind.config.ts — the
+// "Scroll down" bubble's exit animation, kept in sync with the CSS class it
+// switches to on dismiss so the unmount timer doesn't cut the motion short.
+const SCROLL_DOWN_EXIT_MS = 180;
+
 // Above this many calls, a cluster auto-collapses to a one-line summary so a
 // tool-heavy turn doesn't dominate the frame.
 const CLUSTER_COLLAPSE_ABOVE = 2;
@@ -934,14 +939,49 @@ export const ShellTranscript = memo(function ShellTranscript({
   const scrollRef = useRef<HTMLDivElement>(null);
   const wasAtBottomRef = useRef(true);
   const prevLenRef = useRef(0);
+  // Guards handleScroll while a click-triggered smooth scroll is still
+  // animating, so the intermediate `scroll` events it fires along the way
+  // don't read as "still far from bottom" and flip the bubble back on for
+  // the duration of its own click (see scrollToBottom).
+  const scrollingToBottomRef = useRef(false);
   // Mirrors wasAtBottomRef into state, since the ref alone (read by the
   // auto-scroll effect below) never triggers a render — the "Scroll down"
   // bubble needs an actual state flip to appear/disappear.
   const [showScrollDown, setShowScrollDown] = useState(false);
+  // `renderScrollDown` keeps the bubble mounted through its exit animation;
+  // `closingScrollDown` swaps the enter animation for the exit one — same
+  // render/closing split as Overlay's exit-before-unmount (see Overlay.tsx).
+  // Without it, flipping `showScrollDown` straight to false unmounts the
+  // bubble instantly, so clicking it (or scrolling back down) never shows
+  // the matching exit motion.
+  const [renderScrollDown, setRenderScrollDown] = useState(false);
+  const [closingScrollDown, setClosingScrollDown] = useState(false);
+
+  useEffect(() => {
+    if (showScrollDown) {
+      setRenderScrollDown(true);
+      setClosingScrollDown(false);
+      return;
+    }
+    if (!renderScrollDown) return;
+    setClosingScrollDown(true);
+    const reduce =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const t = setTimeout(
+      () => {
+        setRenderScrollDown(false);
+        setClosingScrollDown(false);
+      },
+      reduce ? 0 : SCROLL_DOWN_EXIT_MS,
+    );
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showScrollDown]);
 
   function handleScroll() {
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el || scrollingToBottomRef.current) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 64;
     wasAtBottomRef.current = atBottom;
     setShowScrollDown(!atBottom);
@@ -950,12 +990,25 @@ export const ShellTranscript = memo(function ShellTranscript({
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Instant, not smooth: a smooth scrollTo fires intermediate `scroll` events
-    // for the whole animation, and handleScroll would read those as still-far-
-    // from-bottom and flip the bubble back on for the duration of its own click.
-    el.scrollTop = el.scrollHeight;
     wasAtBottomRef.current = true;
     setShowScrollDown(false);
+    if (typeof el.scrollTo !== "function") {
+      // jsdom (tests) has no smooth-scroll support — jump straight there.
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    scrollingToBottomRef.current = true;
+    const stopGuarding = () => {
+      scrollingToBottomRef.current = false;
+    };
+    if ("onscrollend" in el) {
+      el.addEventListener("scrollend", stopGuarding, { once: true });
+    } else {
+      // Safari lacks `scrollend` — approximate the smooth-scroll duration
+      // instead of guarding handleScroll forever.
+      setTimeout(stopGuarding, 500);
+    }
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, []);
 
   const lastEventId = events.length > 0 ? events[events.length - 1].id : 0;
@@ -1179,20 +1232,29 @@ export const ShellTranscript = memo(function ShellTranscript({
         * sticks to the bottom on its own (see the auto-scroll effect above),
         * so this only ever appears once someone has deliberately scrolled up
         * to read history. */}
-      {showScrollDown && (
-        <button
-          type="button"
-          onClick={scrollToBottom}
-          aria-label="Scroll to the latest message"
-          title="Scroll to the latest message"
-          className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5
-                     rounded-full bg-elevated border border-divider shadow-overlay
-                     px-3 py-1.5 text-[11px] text-ink-soft hover:text-ink hover:bg-elevated/80
-                     transition-colors motion-safe:animate-modal-in"
-        >
-          <ArrowDown className="w-3.5 h-3.5" />
-          Scroll down
-        </button>
+      {renderScrollDown && (
+        // `animate-modal-in` sets the raw `transform` property in its keyframes,
+        // which would stomp a `-translate-x-1/2` on the button itself and leave
+        // it uncentered — so centering lives on this transform-free flex wrapper
+        // instead, and the animation is free to own the button's own transform.
+        <div className="absolute bottom-3 inset-x-0 flex justify-center pointer-events-none">
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            aria-label="Scroll to the latest message"
+            title="Scroll to the latest message"
+            className={cn(
+              "pointer-events-auto flex items-center gap-1.5",
+              "rounded-full bg-elevated border border-divider shadow-overlay",
+              "px-3 py-1.5 text-[11px] text-ink-soft hover:text-ink hover:bg-elevated/80",
+              "transition-colors",
+              closingScrollDown ? "motion-safe:animate-modal-out" : "motion-safe:animate-modal-in",
+            )}
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+            Scroll down
+          </button>
+        </div>
       )}
     </div>
     <ImageLightbox
