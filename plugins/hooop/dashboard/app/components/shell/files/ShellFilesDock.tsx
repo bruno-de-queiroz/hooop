@@ -119,7 +119,11 @@ export function ShellFilesDock() {
         <FileText className="w-4 h-4 shrink-0 text-ink-mute" />
         <div className="min-w-0 flex-1">
           <div className="text-[12.5px] font-medium text-ink truncate leading-tight">{file.name}</div>
-          <div className="font-mono text-[10px] text-ink-faint truncate leading-tight">{file.path}</div>
+          {/* `path` is basename-relative, so a root-level file makes path === name —
+            * skip the redundant line instead of rendering the same text twice. */}
+          {file.path !== file.name && (
+            <div className="font-mono text-[10px] text-ink-faint truncate leading-tight mt-0.5">{file.path}</div>
+          )}
         </div>
         {/* Rendered-markdown toggle. Offered whenever there's current source to
           * render — including changed/added files (they carry `content`
