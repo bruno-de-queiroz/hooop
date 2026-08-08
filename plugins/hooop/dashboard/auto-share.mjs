@@ -17,8 +17,56 @@
  * listeners and spawns cloudflared, so its logic is otherwise unreachable from a
  * test. Every side effect arrives as an injected dependency; this module owns the
  * DECISIONS and none of the transport. server.mjs keeps the debounce and the
- * re-entrancy guard, since those are about its event stream rather than policy.
+ * transport, and drives the sweep through createCoalescingRunner below.
  */
+
+/**
+ * Serialize reconcile passes without ever LOSING one.
+ *
+ * A reconciler is only as good as its trigger. The guard here used to be a bare
+ * `if (running) return`, which serialized correctly and dropped the signal on
+ * the floor: any event arriving mid-pass was discarded, and since nothing sweeps
+ * on a timer, nothing ever went back for it. The preview stayed unshared until
+ * some unrelated event happened to trigger another pass.
+ *
+ * That window is not small. A pass spawns cloudflared, which can take tens of
+ * seconds, and "preview started" then "preview is now running" are exactly the
+ * kind of pair that straddles it — so the common case (start a preview in a
+ * session that peers are already in) is the one most likely to be dropped.
+ *
+ * Re-runs go back through `schedule` rather than looping here, so the caller's
+ * debounce still applies. That bounds the rate no matter how chatty the event
+ * stream gets, and it cannot spin: the sweep is idempotent, so a pass with
+ * nothing left to do produces no further events.
+ *
+ * @param {object} deps
+ * @param {() => Promise<void>} deps.run       one reconcile pass; must not throw
+ * @param {() => void} deps.schedule           request another pass (debounced)
+ * @returns {() => Promise<"ran" | "coalesced">}
+ */
+export function createCoalescingRunner({ run, schedule }) {
+  let running = false;
+  let missed = false;
+  return async function trigger() {
+    if (running) {
+      missed = true;
+      return "coalesced";
+    }
+    running = true;
+    try {
+      await run();
+    } finally {
+      running = false;
+      // Also re-runs after a FAILED pass, which is what we want: the trigger it
+      // swallowed is owed a pass either way.
+      if (missed) {
+        missed = false;
+        schedule();
+      }
+    }
+    return "ran";
+  };
+}
 
 /**
  * One reconcile pass.

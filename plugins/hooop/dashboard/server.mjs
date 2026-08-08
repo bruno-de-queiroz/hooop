@@ -28,9 +28,10 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { request as udsRequest } from "node:http";
 import { readFileSync } from "node:fs";
 import { WebSocketServer } from "ws";
-import { autoShareSweep as reconcileAutoShare } from "./auto-share.mjs";
+import { autoShareSweep as reconcileAutoShare, createCoalescingRunner } from "./auto-share.mjs";
 import { waitForTunnelReachable } from "./tunnel-reachability.mjs";
 import { parseQuickTunnelUrl } from "./quick-tunnel-url.mjs";
+import { cloudflaredArgs, startTunnelWithRetry } from "./tunnel-start.mjs";
 import {
   driverScriptFor, DRIVER_SCRIPT_PATH, DRIVER_SOCKET_PATH, SCRIPT_TAG,
   injectScript, isInjectableHtml, isDocumentRequest, createDriverRegistry,
@@ -608,7 +609,6 @@ function recordPreviewShared(sessionId, previewId, url) {
   });
 }
 
-let autoShareRunning = false;
 // Has a share existed since this process started? The reconciler needs it to tell
 // "the last share just went away" (close the tunnel) from "the host opened a
 // tunnel and has not invited anyone yet" (leave it alone). Process state, so it
@@ -617,18 +617,26 @@ let _sawAnyShare = false;
 /**
  * Run one auto-share reconcile pass. The policy lives in auto-share.mjs so it
  * can be tested — this process boots real listeners and spawns cloudflared, so
- * nothing in here is reachable from a unit test. Here we own only the
- * re-entrancy guard and the wiring of side effects.
+ * nothing in here is reachable from a unit test. Here we own only the wiring of
+ * side effects; serialization is createCoalescingRunner's job, below.
  *
  * Note the direction of travel is preserved: this PULLS from the sandbox and
  * then records the result, exactly as the Next route does, so the
  * sandbox→dashboard arrow still does not exist (see handlePreviewTunnel).
  */
-async function autoShareSweep() {
-  if (autoShareRunning) return;
-  autoShareRunning = true;
+// A failed share does not heal on its own: the sweep only runs on an event, and
+// the events that would have re-triggered it are exactly the ones swallowed
+// while it was busy failing. One chained retry covers the transient case (a
+// refused record, a tunnel that lost a DNS coin-flip) without turning a
+// PERMANENT failure into a cloudflared spawn loop. Deliberately one and not
+// three: startPreviewTunnel already retries internally, so this is a second
+// chance, not a policy of persistence. Cleared by the first clean pass.
+const AUTO_SHARE_RETRY_MS = 10_000;
+let autoShareRetried = false;
+
+async function runAutoShareSweep() {
   try {
-    await reconcileAutoShare({
+    const result = await reconcileAutoShare({
       fetchPreviews, fetchShares, startPreviewTunnel, stopPreviewTunnel,
       recordPreviewShared, log,
       // Tunnel teardown, the other half of the reconcile: previews now end on
@@ -640,12 +648,29 @@ async function autoShareSweep() {
       sawAnyShare: () => _sawAnyShare,
       setSawAnyShare: (v) => { _sawAnyShare = v; },
     });
+    if (result.failed.length === 0) {
+      autoShareRetried = false;
+    } else if (!autoShareRetried) {
+      autoShareRetried = true;
+      log("auto-share:", result.failed.length, "preview(s) failed to share - one retry queued");
+      scheduleAutoShareSweep(AUTO_SHARE_RETRY_MS);
+    } else {
+      // Say so rather than going quiet: a preview that stays unshared with
+      // nothing in the log is the shape this whole bug had.
+      log("auto-share:", result.failed.length, "preview(s) still failing after a retry - giving up until the next event");
+    }
   } catch (e) {
     log("auto-share sweep failed", String(e));
-  } finally {
-    autoShareRunning = false;
   }
 }
+
+// Serialized, and a trigger that lands mid-pass is REPLAYED rather than dropped.
+// See createCoalescingRunner: nothing sweeps on a timer, so a dropped trigger is
+// a preview that stays unshared until something unrelated happens to nudge it.
+const autoShareSweep = createCoalescingRunner({
+  run: runAutoShareSweep,
+  schedule: () => scheduleAutoShareSweep(),
+});
 
 // Debounced, because a single share or preview transition produces a burst of
 // stream frames and the sweep costs two UDS round trips.

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { autoShareSweep } from "./auto-share.mjs";
+import { autoShareSweep, createCoalescingRunner } from "./auto-share.mjs";
 
 // The sweep exists so a preview in an already-shared session becomes shared
 // without anyone clicking Share. Every side effect is injected, so these tests
@@ -214,5 +214,119 @@ describe("autoShareSweep: the dashboard tunnel", () => {
     deps.sawAnyShare = () => true;
     await autoShareSweep(deps);
     expect(deps.stopDashboardTunnel).not.toHaveBeenCalled();
+  });
+});
+
+// A reconciler that drops triggers is a reconciler that does not reconcile.
+// Nothing in the front process sweeps on a timer, so a trigger discarded while
+// a pass was running was gone for good — the "start a preview in an already
+// shared session" case, which is precisely when a pass is slow enough to be
+// straddled, because it is out spawning cloudflared.
+describe("createCoalescingRunner", () => {
+  /** A run that resolves only when the test says so. */
+  const deferred = () => {
+    let release: () => void;
+    const promise = new Promise<void>((r) => { release = r; });
+    return { promise, release: () => release() };
+  };
+
+  it("runs the pass and reports it ran", async () => {
+    const run = vi.fn(async () => {});
+    const schedule = vi.fn();
+    const trigger = createCoalescingRunner({ run, schedule });
+
+    await expect(trigger()).resolves.toBe("ran");
+    expect(run).toHaveBeenCalledOnce();
+    expect(schedule).not.toHaveBeenCalled();
+  });
+
+  it("never runs two passes at once", async () => {
+    const gate = deferred();
+    let concurrent = 0, peak = 0;
+    const run = vi.fn(async () => {
+      peak = Math.max(peak, ++concurrent);
+      await gate.promise;
+      concurrent--;
+    });
+    const trigger = createCoalescingRunner({ run, schedule: () => {} });
+
+    const first = trigger();
+    await expect(trigger()).resolves.toBe("coalesced");
+    gate.release();
+    await first;
+    expect(peak).toBe(1);
+  });
+
+  it("replays a trigger that arrived mid-pass", async () => {
+    const gate = deferred();
+    const run = vi.fn(async () => { await gate.promise; });
+    const schedule = vi.fn();
+    const trigger = createCoalescingRunner({ run, schedule });
+
+    const first = trigger();
+    await trigger();               // dropped by the old guard; owed a pass now
+    expect(schedule).not.toHaveBeenCalled();  // not until the pass is actually done
+    gate.release();
+    await first;
+    expect(schedule).toHaveBeenCalledOnce();
+  });
+
+  it("owes exactly one pass however many triggers were swallowed", async () => {
+    const gate = deferred();
+    const run = vi.fn(async () => { await gate.promise; });
+    const schedule = vi.fn();
+    const trigger = createCoalescingRunner({ run, schedule });
+
+    const first = trigger();
+    await Promise.all([trigger(), trigger(), trigger()]);
+    gate.release();
+    await first;
+    // Coalesced, not queued: the sweep reconciles whole state, so one pass
+    // settles every trigger it swallowed.
+    expect(schedule).toHaveBeenCalledOnce();
+  });
+
+  it("replays after a FAILED pass too", async () => {
+    // The trigger it swallowed is owed a pass either way, and a pass that threw
+    // is the case where the work most likely still needs doing.
+    const gate = deferred();
+    const run = vi.fn(async () => { await gate.promise; throw new Error("boom"); });
+    const schedule = vi.fn();
+    const trigger = createCoalescingRunner({ run, schedule });
+
+    const first = trigger().catch(() => {});
+    await trigger();
+    gate.release();
+    await first;
+    expect(schedule).toHaveBeenCalledOnce();
+  });
+
+  it("does not schedule when nothing was missed", async () => {
+    const run = vi.fn(async () => {});
+    const schedule = vi.fn();
+    const trigger = createCoalescingRunner({ run, schedule });
+
+    await trigger();
+    await trigger();
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(schedule).not.toHaveBeenCalled();
+  });
+
+  it("clears the debt so a later quiet pass does not re-schedule", async () => {
+    const gate = deferred();
+    let block = true;
+    const run = vi.fn(async () => { if (block) await gate.promise; });
+    const schedule = vi.fn();
+    const trigger = createCoalescingRunner({ run, schedule });
+
+    const first = trigger();
+    await trigger();
+    gate.release();
+    await first;
+    expect(schedule).toHaveBeenCalledOnce();
+
+    block = false;
+    await trigger();               // the replayed pass, with nothing pending
+    expect(schedule).toHaveBeenCalledOnce();
   });
 });
