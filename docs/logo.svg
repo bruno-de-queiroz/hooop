@@ -1,7 +1,0 @@
-<svg width="224" height="88" viewBox="0 0 224 88" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="hooop">
-  <rect width="224" height="88" rx="20" fill="#0c0d0f"/>
-  <circle cx="48" cy="44" r="22" stroke="#e87db4" stroke-width="5"/>
-  <circle cx="31.1" cy="27.1" r="5.9" fill="#e87db4"/>
-  <circle cx="64.9" cy="60.9" r="5.9" fill="#0c0d0f" stroke="#f5f4f1" stroke-width="1.7"/>
-  <text x="92" y="58" font-family="Archivo, Helvetica, Arial, sans-serif" font-weight="800" font-size="40" fill="#f5f4f1">hooop</text>
-</svg>
