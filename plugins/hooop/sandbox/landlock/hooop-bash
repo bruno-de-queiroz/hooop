@@ -1,0 +1,41 @@
+#!/bin/sh
+# hooop-bash — the shell claude spawns for its Bash tool, wrapped in Landlock.
+#
+# Installed at /usr/local/bin/hooop-bash and pointed at by CLAUDE_CODE_SHELL
+# (see lib/active-sessions.ts). Claude Code resolves that env var to decide
+# which shell binary to spawn for a Bash tool call; it requires the path to
+# contain "bash" or "zsh" and to be executable, so the filename here is
+# load-bearing — do NOT rename this to something without "bash" in it.
+#
+# WHY A SHELL SHIM instead of rewriting the command in the PreToolUse hook:
+# claude does not keep a persistent shell, but it DOES persist `cd` by having
+# the same shell that ran the command append `pwd -P >| <file>`, and it
+# sources a snapshot defining `rg`/`find`/`grep`/`pkill` shims at the top of
+# every call. Rewriting the command string would push it into a child, so
+# `cd` would silently stop persisting and `rg` would become "command not
+# found" (there is no rg binary in this image — it's a snapshot function).
+# Confining the shell itself keeps all of that intact: cd, the snapshot,
+# output streaming, exit codes and run_in_background behave exactly as they
+# do unconfined.
+#
+# Verified: hooks do NOT route through CLAUDE_CODE_SHELL, so permission-gate.sh
+# still runs unconfined and can read its token. Only the Bash tool, the `env`
+# probe and shell-snapshot creation come through here — which is why the "dev"
+# profile grants ~/.claude/shell-snapshots.
+#
+# HOOOP_LANDLOCK_RW / _RO / _MODE are inherited from the claude process (set
+# once at spawn), so this script takes no arguments of its own and passes
+# everything through untouched.
+#
+# Exit codes are the wrapper's: 126 = Landlock could not be applied (enforce
+# mode refuses to run unconfined), 127 = exec failed.
+
+# `claude` probes the shell with --version before using it. Answer that
+# directly: the probe only needs to prove this is a working bash, and routing
+# it through Landlock would make an unrelated confinement failure look like
+# "not a valid bash path", which silently falls back to an unconfined shell.
+if [ "$1" = "--version" ]; then
+	exec /bin/bash --version
+fi
+
+exec /usr/local/bin/hooop-sandbox-exec /bin/bash "$@"

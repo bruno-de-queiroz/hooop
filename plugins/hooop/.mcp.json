@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "tools": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/tools-server.mjs"],
+      "alwaysLoad": true
+    }
+  }
+}

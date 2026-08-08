@@ -1,0 +1,11 @@
+{
+  "name": "hooop",
+  "description": "Being alone is not a requirement. A sandboxed and web harness on top of claude code.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Bruno Queiroz",
+    "email": "3382621+bruno-de-queiroz@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/bruno-de-queiroz/hooop",
+  "license": "MIT"
+}

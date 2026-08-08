@@ -1,0 +1,25 @@
+{
+  "name": "hooop-preview-runner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Isolated per-session preview runner for hooop: executes a preview spec (setup steps + a long-lived run command) and forwards a fixed container port to whatever loopback port the app chose. No claude, no credentials, no control socket.",
+  "type": "module",
+  "main": "dist/server.mjs",
+  "scripts": {
+    "build": "esbuild server.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/server.mjs --tsconfig=tsconfig.json",
+    "start": "node dist/server.mjs",
+    "start:dev": "node --import tsx ./server.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.23.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.6"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

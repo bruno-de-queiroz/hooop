@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>hooop · Plan panel (docked, real layout) mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  :root, [data-theme="dark"] {
+    --bg: 20 18 16; --window: 32 30 27; --rail: 26 24 21; --center: 34 31 28;
+    --elevated: 43 40 37; --elevated-2: 51 47 43;
+    --sunken: rgba(0,0,0,0.28); --divider: rgba(255,255,255,0.07);
+    --ink: 237 232 224; --ink-soft: 203 196 185; --ink-mute: 148 141 130;
+    --ink-faint: 107 100 91; --ink-hush: 76 70 62;
+    --accent: 226 102 167; --accent-press: 199 90 147;
+    --live: 245 181 68; --wrap: 62 207 142; --sdk: 90 162 240;
+    --direct: 192 132 252; --fail: 251 113 133;
+    --host-bubble: 47 111 82; --peer-bubble: 69 137 212;
+    --font-sans: "Archivo", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  }
+  [data-theme="light"] {
+    --bg: 233 235 239; --window: 246 247 249; --rail: 238 240 244; --center: 253 253 254;
+    --elevated: 233 235 240; --elevated-2: 222 226 232;
+    --sunken: rgba(17,24,39,0.05); --divider: rgba(17,24,39,0.09);
+    --ink: 20 22 27; --ink-soft: 44 49 58; --ink-mute: 84 91 103;
+    --ink-faint: 130 138 150; --ink-hush: 169 175 186;
+    --accent: 226 102 167; --accent-press: 199 90 147;
+    --live: 180 83 9; --wrap: 23 151 106; --sdk: 59 118 207;
+    --direct: 138 87 207; --fail: 216 87 107;
+    --host-bubble: 46 125 90; --peer-bubble: 59 118 207;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: var(--font-sans);
+    background: rgb(var(--bg));
+    color: rgb(var(--ink));
+    padding: 12px;
+    -webkit-font-smoothing: antialiased;
+    font-size: 13px;
+  }
+  .window {
+    height: 100%; display: flex; flex-direction: column;
+    background: rgb(var(--window));
+    border-radius: 22px; overflow: hidden;
+    box-shadow: 0 24px 60px -20px rgba(0,0,0,0.7);
+  }
+  .icon-btn {
+    width: 32px; height: 32px; display: inline-flex; align-items: center;
+    justify-content: center; color: rgb(var(--ink-mute)); border: none;
+    background: transparent; border-radius: 9px; cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .icon-btn:hover { color: rgb(var(--ink)); background: rgb(var(--elevated)); }
+  .icon-btn svg { width: 16px; height: 16px; }
+
+  /* Title bar */
+  .titlebar {
+    height: 48px; flex: 0 0 auto; display: flex; align-items: center;
+    gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--divider);
+    background: rgb(var(--rail));
+  }
+  .logo-mark { width: 18px; height: 18px; border-radius: 6px;
+    background: rgb(var(--accent)); display: inline-block; }
+  .brand { font-weight: 700; letter-spacing: -0.02em; }
+  .titlebar .spacer { margin-left: auto; }
+  .theme-seg { display: inline-flex; gap: 2px; background: var(--sunken);
+    border-radius: 9px; padding: 2px; }
+  .theme-seg button { width: 28px; height: 26px; display: inline-flex; align-items: center;
+    justify-content: center; color: rgb(var(--ink-faint)); border: none; background: transparent;
+    border-radius: 7px; cursor: pointer; }
+  .theme-seg button.is-on { color: rgb(var(--accent)); background: rgb(var(--elevated)); }
+  .theme-seg button svg { width: 14px; height: 14px; }
+
+  /* Main row */
+  .row { flex: 1 1 auto; min-height: 0; display: flex; }
+
+  /* Rails */
+  .rail { flex: 0 0 auto; display: flex; flex-direction: column; background: rgb(var(--rail)); }
+  .rail-left { width: 272px; border-right: 1px solid var(--divider); }
+  .rail-right { width: 304px; border-left: 1px solid var(--divider); }
+  .rail-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px; }
+  .rail-foot { flex: 0 0 auto; border-top: 1px solid var(--divider);
+    padding: 10px 12px; display: flex; align-items: center; gap: 8px; }
+
+  .field { background: var(--sunken); border: 1px solid var(--divider);
+    border-radius: 10px; color: rgb(var(--ink)); font-family: var(--font-sans);
+    font-size: 12px; padding: 7px 10px; width: 100%; outline: none; }
+  .field::placeholder { color: rgb(var(--ink-hush)); }
+
+  .section-title { font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: rgb(var(--ink-faint));
+    display: flex; align-items: center; gap: 6px; margin: 14px 2px 8px; }
+  .section-title .count { background: rgb(var(--elevated)); color: rgb(var(--ink-faint));
+    border-radius: 6px; font-size: 10px; padding: 1px 6px; letter-spacing: 0; }
+  .section-title .sp { margin-left: auto; }
+
+  .list-row { border-radius: 11px; color: rgb(var(--ink-soft));
+    padding: 8px 10px; cursor: pointer; transition: background .12s; margin-bottom: 2px;
+    display: flex; align-items: center; gap: 10px; }
+  .list-row:hover { background: rgb(var(--elevated)); }
+  .list-row.is-active { background: color-mix(in oklab, rgb(var(--accent)) 14%, transparent); }
+  .list-row .r-title { font-size: 13px; font-weight: 600; color: rgb(var(--ink)); }
+  .list-row .r-sub { font-size: 11px; color: rgb(var(--ink-mute)); margin-top: 2px; }
+  .dot { width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto; }
+  .dot.live { background: rgb(var(--live)); } .dot.wrap { background: rgb(var(--wrap)); }
+  .dot.mute { background: rgb(var(--ink-hush)); }
+
+  .avatar { width: 28px; height: 28px; border-radius: 999px; flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 600; font-size: 11px; background: rgb(var(--elevated)); color: rgb(var(--ink-soft)); }
+  .avatar.acc { background: color-mix(in oklab, rgb(var(--accent)) 18%, rgb(var(--elevated))); color: rgb(var(--accent)); }
+  .avatar.wrap { background: color-mix(in oklab, rgb(var(--wrap)) 18%, rgb(var(--elevated))); color: rgb(var(--wrap)); }
+  .avatar.sdk { background: color-mix(in oklab, rgb(var(--sdk)) 30%, rgb(var(--elevated))); color: rgb(var(--sdk)); }
+  .avatar.direct { background: color-mix(in oklab, rgb(var(--direct)) 26%, rgb(var(--elevated))); color: rgb(var(--direct)); }
+
+  /* Center pane */
+  .center { flex: 1 1 0; min-width: 22rem; display: flex; flex-direction: column; background: rgb(var(--center)); }
+  .sess-head { flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
+    height: 56px; padding: 0 20px; border-bottom: 1px solid var(--divider); }
+  .sess-title { font-size: 15px; font-weight: 700; }
+  .pbadge { display: inline-flex; align-items: center; gap: 6px; background: rgb(var(--elevated));
+    color: rgb(var(--ink-soft)); border-radius: 999px; padding: 3px 9px; font-size: 11px; font-weight: 600; }
+  .chip { display: inline-flex; align-items: center; background: rgb(var(--elevated));
+    color: rgb(var(--ink-faint)); border-radius: 6px; padding: 3px 8px;
+    font-family: var(--font-mono); font-size: 10px; }
+  .stats { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; height: 34px;
+    padding: 0 20px; border-bottom: 1px solid var(--divider);
+    font-family: var(--font-mono); font-size: 11px; color: rgb(var(--ink-faint)); }
+  .stats b { color: rgb(var(--ink)); font-weight: 600; }
+  .stats .sep { color: rgb(var(--ink-hush)); }
+  .meter { width: 90px; height: 5px; border-radius: 999px; background: var(--sunken); overflow: hidden; }
+  .meter > i { display: block; height: 100%; width: 21%; background: rgb(var(--ink-mute)); }
+
+  .transcript { flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .msg-cmd { align-self: flex-end; max-width: 70%; background: color-mix(in oklab, rgb(var(--accent)) 8%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, rgb(var(--accent)) 30%, transparent);
+    border-radius: 12px; padding: 8px 12px; font-family: var(--font-mono); font-size: 12px; color: rgb(var(--ink)); }
+  .msg-cmd .cmd { color: rgb(var(--accent)); }
+  .agent-line { display: flex; gap: 10px; max-width: 720px; }
+  .agent-line .who { font-size: 11px; color: rgb(var(--ink-mute)); margin-bottom: 4px; }
+  .agent-line .text { font-size: 13px; color: rgb(var(--ink-soft)); line-height: 1.55; }
+  .review-card { display: flex; align-items: center; gap: 12px; background: var(--sunken);
+    border: 1px solid var(--divider); border-radius: 12px; padding: 12px 14px; margin-top: 8px; }
+  .review-card .warn { color: rgb(var(--live)); flex: 0 0 auto; }
+  .review-card .rc-text { font-size: 12px; color: rgb(var(--ink-soft)); flex: 1; }
+  .accent-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    background: rgb(var(--accent)); color: #fff; border: none; cursor: pointer;
+    border-radius: 10px; padding: 8px 16px; font-family: var(--font-sans); font-size: 12px; font-weight: 600; }
+  .accent-btn:hover { filter: brightness(1.07); }
+  .accent-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .pill-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    background: rgb(var(--elevated)); color: rgb(var(--ink-soft)); border: none; cursor: pointer;
+    border-radius: 10px; padding: 8px 14px; font-family: var(--font-sans); font-size: 12px; font-weight: 600; }
+  .pill-btn:hover { background: rgb(var(--elevated-2)); color: rgb(var(--ink)); }
+  .pill-btn:disabled { opacity: .4; cursor: not-allowed; }
+  /* v1 footer buttons: green Approve + ghost Request changes, split full-width */
+  .btn { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    border-radius: 10px; padding: 9px 14px; font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+    border: none; cursor: pointer; }
+  .btn svg { width: 15px; height: 15px; }
+  .btn.accent { background: rgb(var(--wrap)); color: #06130d; }
+  .btn.accent:hover { filter: brightness(1.05); }
+  .btn.accent:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.ghost { background: rgb(var(--elevated)); color: rgb(var(--ink-soft)); }
+  .btn.ghost:hover { background: rgb(var(--elevated-2)); color: rgb(var(--ink)); }
+
+  .composer { flex: 0 0 auto; padding: 4px 20px 8px; }
+  .composer .cfield { background: var(--sunken); border: 1px solid var(--divider);
+    border-radius: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 10px; }
+  .composer textarea { flex: 1; background: transparent; border: none; outline: none; resize: none;
+    color: rgb(var(--ink)); font-family: var(--font-sans); font-size: 13px; line-height: 1.4; height: 40px; padding-top: 6px; }
+  .composer textarea::placeholder { color: rgb(var(--ink-hush)); }
+  .send { width: 34px; height: 34px; border-radius: 10px; border: none; cursor: pointer;
+    background: rgb(var(--accent)); color: #fff; display: inline-flex; align-items: center; justify-content: center; }
+  .composer .hintline { margin-top: 6px; font-family: var(--font-mono); font-size: 10px; color: rgb(var(--ink-hush)); }
+
+  /* ── Plan panel: docked sibling, resizable ───────────────────────── */
+  .plan { position: relative; flex: 0 0 auto; width: 480px; min-width: 380px; max-width: 760px;
+    display: flex; flex-direction: column; background: rgb(var(--window));
+    border-left: 1px solid var(--divider);
+    transition: width .28s cubic-bezier(.22,1,.36,1), opacity .2s ease; }
+  .plan.collapsed { width: 0 !important; min-width: 0; opacity: 0; overflow: hidden; border-left-color: transparent; }
+  .resizer { position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 40; }
+  .resizer::after { content: ""; position: absolute; left: 2px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background .15s; }
+  .resizer:hover::after, .resizer.dragging::after { background: rgb(var(--accent)); }
+  body.resizing { cursor: col-resize; user-select: none; }
+  body.resizing .plan { transition: none; }
+
+  .plan-head { flex: 0 0 auto; height: 56px; display: flex; align-items: center; gap: 10px;
+    padding: 0 16px; border-bottom: 1px solid var(--divider); }
+  .plan-head h3 { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 600; color: rgb(var(--ink)); }
+  .plan-head h3 svg { color: rgb(var(--live)); width: 16px; height: 16px; }
+  .plan-head .ph-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .plan-head .pc { font-size: 12px; color: rgb(var(--ink-faint)); }
+  .nav-btn { border: none; background: transparent; color: rgb(var(--ink-mute)); border-radius: 8px; cursor: pointer; padding: 2px; display: inline-flex; }
+  .nav-btn:hover { background: rgb(var(--elevated)); color: rgb(var(--ink)); }
+  .nav-btn svg { width: 13px; height: 13px; }
+  .close-x { border: none; background: transparent; color: rgb(var(--ink-faint)); cursor: pointer; padding: 2px; display: inline-flex; border-radius: 8px; }
+  .close-x:hover { color: rgb(var(--ink)); background: rgb(var(--elevated)); }
+  .close-x svg { width: 16px; height: 16px; }
+
+  .plan-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+  .plan-anchor { position: relative; }
+  .md { padding: 16px; font-size: 13px; line-height: 1.6; color: rgb(var(--ink-soft)); }
+  /* Markdown mapping mirrors Markdown.tsx */
+  .md h1 { font-size: 15px; font-weight: 600; color: rgb(var(--ink)); margin: 8px 0 4px; }
+  .md h2 { font-size: 14px; font-weight: 600; color: rgb(var(--ink)); margin: 8px 0 4px; }
+  .md h3 { font-size: 13px; font-weight: 600; color: rgb(var(--ink-soft)); margin: 8px 0 4px; }
+  .md p { margin: 4px 0; overflow-wrap: anywhere; }
+  .md strong { font-weight: 600; color: rgb(var(--ink)); }
+  .md em { font-style: italic; }
+  .md ul { list-style: disc; padding-left: 18px; margin: 4px 0; }
+  .md ol { list-style: decimal; padding-left: 18px; margin: 4px 0; }
+  .md li { margin: 2px 0; overflow-wrap: anywhere; }
+  .md li::marker { color: rgb(var(--ink-hush)); }
+  .md blockquote { border-left: 2px solid var(--divider); padding-left: 8px; margin: 4px 0;
+    color: rgb(var(--ink-mute)); font-style: italic; }
+  .md a { color: rgb(var(--sdk)); text-decoration: underline; text-decoration-color: color-mix(in oklab, rgb(var(--sdk)) 40%, transparent); }
+  .md code { padding: 1px 4px; border-radius: 4px; background: var(--sunken); color: rgb(var(--ink));
+    font-family: var(--font-mono); font-size: 11px; }
+  .md pre { background: var(--sunken); border: 1px solid var(--divider); border-radius: 8px;
+    padding: 8px 10px; overflow-x: auto; margin: 6px 0; }
+  .md pre code { padding: 0; background: transparent; font-size: 11px; line-height: 1.5; color: rgb(var(--ink-soft)); }
+  .md hr { border: none; border-top: 1px solid var(--divider); margin: 8px 0; }
+
+  /* commented passage highlight (amber, like the real live/15) */
+  .cmt-hl { background: color-mix(in oklab, rgb(var(--live)) 15%, transparent); border-radius: 3px; cursor: pointer; }
+  .cmt-hl.is-open { background: color-mix(in oklab, rgb(var(--live)) 30%, transparent); box-shadow: 0 0 0 1px color-mix(in oklab, rgb(var(--live)) 40%, transparent); }
+
+  /* comment pin (MessageSquare) */
+  .pin { position: absolute; width: 20px; height: 20px; transform: translateY(-50%); z-index: 20;
+    display: inline-flex; align-items: center; justify-content: center; border-radius: 999px;
+    border: 1px solid color-mix(in oklab, rgb(var(--live)) 50%, transparent);
+    background: color-mix(in oklab, rgb(var(--live)) 15%, transparent); color: rgb(var(--live));
+    cursor: pointer; box-shadow: 0 24px 60px -20px rgba(0,0,0,.7); }
+  .pin:hover { background: color-mix(in oklab, rgb(var(--live)) 25%, transparent); }
+  .pin.is-open { background: rgb(var(--live)); color: rgb(var(--window)); border-color: rgb(var(--live)); }
+  .pin svg { width: 11px; height: 11px; }
+
+  /* comment bubble (popover) — v1 layout & fonts: sans body, plain-text green Resolve */
+  .bubble { position: absolute; width: 288px; z-index: 30; border-radius: 12px;
+    border: 1px solid var(--divider); background: rgb(var(--elevated)); padding: 10px 12px;
+    box-shadow: 0 40px 120px -30px rgba(0,0,0,.8); }
+  .bubble .b-head { display: flex; align-items: center; gap: 8px; }
+  .bubble .b-name { font-size: 12px; font-weight: 600; color: rgb(var(--ink)); }
+  .bubble .b-time { font-size: 11px; color: rgb(var(--ink-mute)); }
+  .resolve-btn { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; border: none;
+    background: none; cursor: pointer; color: rgb(var(--wrap)); font-family: var(--font-sans);
+    font-size: 11px; font-weight: 600; padding: 0; }
+  .resolve-btn:hover { filter: brightness(1.1); }
+  .bubble .b-body { margin-top: 6px; font-family: var(--font-sans); font-size: 12px; color: rgb(var(--ink-soft)); line-height: 1.5; }
+  .bubble .b-reply { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .bubble .b-reply .avatar { width: 20px; height: 20px; font-size: 10px; }
+  .bubble .b-reply input { flex: 1; background: var(--sunken); border: 1px solid var(--divider);
+    border-radius: 8px; color: rgb(var(--ink-soft)); font-family: var(--font-sans); font-size: 12px; padding: 5px 8px; outline: none; }
+  .bubble .b-reply input::placeholder { color: rgb(var(--ink-hush)); }
+
+  .plan-foot { flex: 0 0 auto; border-top: 1px solid var(--divider); padding: 16px; }
+  .note { width: 100%; background: var(--sunken); border: 1px solid var(--divider); border-radius: 10px;
+    color: rgb(var(--ink)); font-family: var(--font-mono); font-size: 12px; padding: 8px 10px; resize: none; outline: none; }
+  .note::placeholder { color: rgb(var(--ink-hush)); }
+  .blocked { display: flex; align-items: flex-start; justify-content: center; gap: 8px; text-align: center;
+    margin-top: 10px; border: 1px solid color-mix(in oklab, rgb(var(--live)) 30%, transparent);
+    background: color-mix(in oklab, rgb(var(--live)) 15%, transparent); color: rgb(var(--live));
+    border-radius: 10px; padding: 8px 12px; font-size: 11px; line-height: 1.4; }
+  .blocked svg { width: 14px; height: 14px; flex: 0 0 auto; margin-top: 1px; }
+  .plan-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+
+  /* Right rail cards */
+  .summary-card { background: linear-gradient(180deg,
+      color-mix(in oklab, rgb(var(--accent)) 8%, rgb(var(--elevated))), rgb(var(--elevated)));
+    border: 1px solid color-mix(in oklab, rgb(var(--accent)) 20%, var(--divider));
+    border-radius: 14px; padding: 12px 14px; }
+  .summary-label { font-size: 9px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+    color: color-mix(in oklab, rgb(var(--accent)) 62%, rgb(var(--ink-mute))); margin-bottom: 3px; }
+  .summary-card p { margin: 0 0 8px; font-size: 12px; color: rgb(var(--ink-soft)); line-height: 1.5; }
+  .skill-row, .agent-row { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 10px; cursor: pointer; }
+  .skill-row:hover, .agent-row:hover { background: rgb(var(--elevated)); }
+  .skill-row .s-name { font-size: 13px; color: rgb(var(--ink-soft)); }
+  .skill-row .s-src { margin-left: auto; font-size: 10px; color: rgb(var(--ink-faint)); background: rgb(var(--elevated)); border-radius: 6px; padding: 1px 6px; }
+  .play { width: 22px; height: 22px; border-radius: 7px; background: rgb(var(--elevated)); color: rgb(var(--ink-mute));
+    display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+  .play svg { width: 12px; height: 12px; }
+  .agent-row .a-name { font-size: 13px; font-weight: 600; color: rgb(var(--ink)); }
+  .agent-row .a-sub { font-size: 11px; color: rgb(var(--ink-mute)); }
+
+  /* Floating reopen button */
+  .reopen { position: fixed; right: 24px; bottom: 24px; display: none; align-items: center; gap: 8px;
+    background: rgb(var(--accent)); color: #fff; border: none; cursor: pointer; border-radius: 999px;
+    padding: 12px 18px; font-family: var(--font-sans); font-weight: 600; font-size: 13px; box-shadow: 0 12px 30px -8px rgba(0,0,0,.6); }
+  body.plan-closed .reopen { display: inline-flex; }
+  .reopen svg { width: 16px; height: 16px; }
+  .hint { position: fixed; left: 24px; bottom: 20px; font-size: 11px; color: rgb(var(--ink-faint)); }
+
+  /* Mobile: rails drop away and the plan review goes full-screen (matches the
+     real shell, which makes the chat full-screen below lg). The docked/resizable
+     column collapses to a full-bleed overlay when open. */
+  @media (max-width: 1024px) {
+    body { padding: 0; }
+    .window { border-radius: 0; }
+    .rail-left, .rail-right { display: none; }
+    .resizer { display: none; }
+    .plan { position: fixed; inset: 0; z-index: 100; width: auto !important; min-width: 0; max-width: none;
+      border-left: none; border-radius: 0; transition: opacity .2s ease; }
+    .plan.collapsed { display: none; }
+    .bubble { width: min(288px, calc(100vw - 32px)); }
+    .hint { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="window">
+    <!-- Title bar -->
+    <div class="titlebar">
+      <span class="logo-mark"></span>
+      <span class="brand">hooop</span>
+      <div class="spacer"></div>
+      <button class="icon-btn" title="Search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      </button>
+      <div class="theme-seg">
+        <button title="System"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 21h8"/></svg></button>
+        <button title="Light"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4 12H2M22 12h-2M6 6 4.5 4.5M18 6l1.5-1.5M6 18l-1.5 1.5M18 18l1.5 1.5"/></svg></button>
+        <button class="is-on" title="Dark"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+      </div>
+    </div>
+
+    <div class="row">
+      <!-- Left rail -->
+      <aside class="rail rail-left">
+        <div class="rail-body">
+          <input class="field" placeholder="search sessions or events…" />
+
+          <div class="section-title">Needs review <span class="count">1</span><span class="sp"></span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+          <div class="list-row" id="needsReviewRow" title="Open plan (switches to this session)" style="box-shadow: inset 0 0 0 1px color-mix(in oklab, rgb(var(--live)) 30%, transparent);">
+            <span class="avatar acc">GC</span>
+            <div><div class="r-title">gate-check</div><div class="r-sub">plan waiting · review</div></div>
+          </div>
+
+          <div class="section-title">Active <span class="count">1</span></div>
+          <div class="list-row is-active">
+            <span class="avatar acc">GC</span>
+            <div><div class="r-title">gate-check</div><div class="r-sub">running · active</div></div>
+          </div>
+
+          <div class="section-title">Dormant</div>
+          <div class="list-row">
+            <span class="avatar">gc</span>
+            <div><div class="r-title">gc</div><div class="r-sub">resume · dormant 1h</div></div>
+          </div>
+          <div class="list-row">
+            <span class="avatar">am</span>
+            <div><div class="r-title">amber-padding-thompson</div><div class="r-sub">resume · dormant 2h</div></div>
+          </div>
+          <div class="list-row">
+            <span class="avatar">wq</span>
+            <div><div class="r-title">webhook-queue</div><div class="r-sub">resume · dormant 21h</div></div>
+          </div>
+          <div class="list-row">
+            <span class="avatar">ix</span>
+            <div><div class="r-title">invoice-index</div><div class="r-sub">resume · dormant 1d</div></div>
+          </div>
+        </div>
+        <div class="rail-foot">
+          <span class="avatar">BQ</span>
+          <div style="min-width:0"><div style="font-size:12px;font-weight:600">Bruno de Queiroz</div>
+          <div style="font-size:11px;color:rgb(var(--ink-mute))">Product Engineer</div></div>
+          <button class="icon-btn" style="margin-left:auto" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Center chat frame -->
+      <main class="center">
+        <div class="sess-head">
+          <div class="sess-title">gate-check</div>
+          <span class="pbadge">BR</span>
+          <span class="chip">/home/agent/workspace</span>
+          <div style="margin-left:auto;display:flex;gap:2px">
+            <button class="icon-btn" title="Switch session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg></button>
+            <button class="icon-btn" title="Share"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/></svg></button>
+            <button class="icon-btn" title="Expand chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button>
+            <button class="icon-btn" title="More"><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>
+          </div>
+        </div>
+
+        <div class="stats">
+          <span>model <b>Sonnet 5</b></span><span class="sep">·</span>
+          <span>time <b>1m 35s</b></span><span class="sep">·</span>
+          <span>context <b>21%</b></span>
+          <span class="meter"><i></i></span>
+          <span><b>41k</b> / 200k</span>
+        </div>
+
+        <div class="transcript">
+          <div class="msg-cmd"><span class="cmd">/plan</span> add a shout(text) function to hello.py</div>
+          <div class="agent-line">
+            <span class="avatar direct">C</span>
+            <div>
+              <div class="who">Claude · 10:24 AM</div>
+              <div class="text">Plan submitted — waiting on approval before locating <code style="font-family:var(--font-mono);font-size:11px;background:var(--sunken);padding:1px 4px;border-radius:4px">hello.py</code> and adding the <code style="font-family:var(--font-mono);font-size:11px;background:var(--sunken);padding:1px 4px;border-radius:4px">shout(text)</code> function.</div>
+              <div class="review-card">
+                <span class="warn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span>
+                <div class="rc-text">Claude finished a plan and is waiting for your review.</div>
+                <button class="accent-btn" id="reviewPlanBtn">Review plan</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer">
+          <div class="cfield">
+            <button class="icon-btn" title="Attach image"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg></button>
+            <textarea placeholder="type a message…"></textarea>
+            <button class="send" title="Send"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg></button>
+          </div>
+          <div class="hintline">enter to send · shift+enter for newline · ↑↓ history · ! bash · &gt; chat · / commands · @ files</div>
+        </div>
+      </main>
+
+      <!-- Plan panel: docked sibling between chat frame and right rail -->
+      <section class="plan" id="plan">
+        <div class="resizer" id="resizer" title="Drag to resize"></div>
+        <div class="plan-head">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3"/><path d="M9 12h6M9 16h4"/></svg>
+            Plan review
+          </h3>
+          <div class="ph-right">
+            <span class="pc">2 comments</span>
+            <button class="nav-btn" title="Previous comment"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m18 15-6-6-6 6"/></svg></button>
+            <button class="nav-btn" title="Next comment"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg></button>
+            <button class="close-x" id="closePlan" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+          </div>
+        </div>
+
+        <div class="plan-body" id="planScroll">
+          <div class="plan-anchor" id="planAnchor">
+            <div class="md" id="planMd"><!-- markdown injected here --></div>
+            <!-- comment pins + bubbles injected here -->
+          </div>
+        </div>
+
+        <div class="plan-foot">
+          <textarea class="note" rows="2" placeholder="Overall note (optional)…"></textarea>
+          <div class="blocked">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+            <span>2 open comments — approving sends the plan as-written, so send them back with <b>Request changes</b> or resolve them before you can approve.</span>
+          </div>
+          <div class="plan-actions">
+            <button class="btn accent" disabled title="Resolve or send the 2 open comments first">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>
+              Approve
+            </button>
+            <button class="btn ghost">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+              Request changes
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right rail -->
+      <aside class="rail rail-right">
+        <div class="rail-body">
+          <div class="section-title">Summary <span class="sp"></span>
+            <button class="icon-btn" style="width:22px;height:22px" title="Refresh"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></button>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Request</div>
+            <p>Add a <code style="font-family:var(--font-mono);font-size:11px">shout(text)</code> function to <code style="font-family:var(--font-mono);font-size:11px">hello.py</code> that returns the text uppercased with an exclamation mark appended.</p>
+            <div class="summary-label">Plan</div>
+            <p style="margin:0"><span style="color:rgb(var(--accent))">Add shout(text) to hello.py</span> · waiting for review</p>
+          </div>
+
+          <div class="section-title">Skills <span class="count">18</span><span class="sp"></span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+          <input class="field" placeholder="filter skills…" style="margin-bottom:6px" />
+          <div class="skill-row"><span class="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span class="s-name">babysit</span><span class="s-src">claude-mem</span></div>
+          <div class="skill-row"><span class="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span class="s-name">learn-codebase</span><span class="s-src">claude-mem</span></div>
+          <div class="skill-row"><span class="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span class="s-name">make-plan</span><span class="s-src">claude-mem</span></div>
+          <div class="skill-row"><span class="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span><span class="s-name">smart-explore</span><span class="s-src">claude-mem</span></div>
+
+          <div class="section-title">Sub-agents <span class="count">1</span></div>
+          <div class="agent-row"><span class="avatar sdk" style="width:26px;height:26px">E</span>
+            <div><div class="a-name">Explore</div><div class="a-sub">Locate hello.py in workspace</div></div>
+            <span class="dot wrap" style="margin-left:auto"></span></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <button class="reopen" id="reopenPlan">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3"/></svg>
+    Open plan
+  </button>
+  <span class="hint">Drag the panel's left edge to resize · click a comment pin to open its bubble · ✕ collapses</span>
+
+  <script>
+    // ── Plan content: rendered as real Markdown (marked), styled to match hooop's
+    //    Markdown.tsx component mapping. ─────────────────────────────────────────
+    const PLAN = [
+      "# Add `shout(text)` to hello.py",
+      "",
+      "## Context",
+      "The workspace has a `hello.py` at the repo root. I'll add a small helper and wire it into the existing entrypoint so the greeting is shouted.",
+      "",
+      "## Steps",
+      "1. Locate `hello.py` in the workspace.",
+      "2. Add a `shout(text)` helper that uppercases the text and appends an exclamation mark:",
+      "```python",
+      "def shout(text: str) -> str:",
+      "    return text.upper() + \"!\"",
+      "```",
+      "3. Call the helper from `main()` so the printed greeting is shouted.",
+      "",
+      "## Verification",
+      "- Run `python3 hello.py` and confirm the greeting prints in uppercase.",
+      "- Add a unit test covering empty and unicode input.",
+      "",
+      "## Risks & mitigations",
+      "- Changing the greeting output could break a downstream snapshot test — keep the original path behind a flag until the test is updated.",
+    ].join("\n");
+
+    const mdEl = document.getElementById("planMd");
+    mdEl.innerHTML = marked.parse(PLAN);
+
+    // ── Comment model (mock). Each anchors to a text phrase in the plan. ────────
+    const COMMENTS = [
+      { id: "c1", author: "Sarah", initials: "S", tone: "sdk", time: "10:24 AM", phrase: "uppercases the text",
+        body: "Should we handle None / non-string input here, or is that out of scope?", open: true },
+      { id: "c2", author: "Maya", initials: "M", tone: "direct", time: "10:26 AM", phrase: "unit test",
+        body: "Please also assert it's idempotent on already-uppercased strings.", open: false },
+    ];
+
+    const anchor = document.getElementById("planAnchor");
+
+    // Wrap the first occurrence of `phrase` (within a single text node) in a
+    // highlight span so we can pin a comment to it — mirrors PlanPanel's
+    // offset-anchored highlight.
+    function wrapPhrase(root, phrase, cid) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const i = node.nodeValue.indexOf(phrase);
+        if (i < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, i);
+        range.setEnd(node, i + phrase.length);
+        const span = document.createElement("span");
+        span.className = "cmt-hl";
+        span.dataset.cid = cid;
+        range.surroundContents(span);
+        return span;
+      }
+      return null;
+    }
+
+    const state = {};
+    COMMENTS.forEach((c) => {
+      const span = wrapPhrase(mdEl, c.phrase, c.id);
+      if (!span) return;
+      const top = span.offsetTop + span.offsetHeight / 2;
+      const left = Math.min(span.offsetLeft + span.offsetWidth + 4, anchor.clientWidth - 24);
+
+      // pin
+      const pin = document.createElement("button");
+      pin.className = "pin";
+      pin.style.top = top + "px";
+      pin.style.left = left + "px";
+      pin.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+      anchor.appendChild(pin);
+
+      // bubble
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      const bTop = top + 14;
+      const bLeft = Math.max(4, Math.min(span.offsetLeft, anchor.clientWidth - 300));
+      bubble.style.top = bTop + "px";
+      bubble.style.left = bLeft + "px";
+      bubble.innerHTML =
+        '<div class="b-head">' +
+          '<span class="avatar ' + c.tone + '" style="width:24px;height:24px;font-size:10px">' + c.initials + '</span>' +
+          '<span class="b-name">' + c.author + '</span>' +
+          '<span class="b-time">' + c.time + '</span>' +
+          '<button class="resolve-btn" title="Resolve (mark handled)">Resolve</button>' +
+          '<button class="close-x b-close" title="Close">' +
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>' +
+          '</button>' +
+        '</div>' +
+        '<div class="b-body">' + c.body + '</div>' +
+        '<div class="b-reply"><span class="avatar">BQ</span><input placeholder="Reply…" /></div>';
+      anchor.appendChild(bubble);
+
+      state[c.id] = { span, pin, bubble };
+
+      const setOpen = (open) => {
+        c.open = open;
+        bubble.style.display = open ? "block" : "none";
+        pin.classList.toggle("is-open", open);
+        span.classList.toggle("is-open", open);
+      };
+      setOpen(c.open);
+
+      pin.addEventListener("click", (e) => { e.stopPropagation(); setOpen(!c.open); });
+      span.addEventListener("click", (e) => { e.stopPropagation(); setOpen(!c.open); });
+      bubble.querySelector(".b-close").addEventListener("click", () => setOpen(false));
+      bubble.querySelector(".resolve-btn").addEventListener("click", () => {
+        // Resolve: drop the comment (highlight + pin + bubble) — no destructive "delete".
+        span.replaceWith(...span.childNodes);
+        pin.remove(); bubble.remove();
+      });
+    });
+
+    // ── Panel open/close + theme + resize ───────────────────────────────────────
+    const plan = document.getElementById("plan");
+    const closeBtn = document.getElementById("closePlan");
+    const reopenBtn = document.getElementById("reopenPlan");
+    const reviewBtn = document.getElementById("reviewPlanBtn");
+    closeBtn.addEventListener("click", () => { plan.classList.add("collapsed"); document.body.classList.add("plan-closed"); });
+    const openPlan = () => { plan.classList.remove("collapsed"); document.body.classList.remove("plan-closed"); };
+    reopenBtn.addEventListener("click", openPlan);
+    reviewBtn.addEventListener("click", openPlan);
+
+    // Clicking a plan in the left rail's "Needs review" list navigates to that
+    // session (mark it active) and opens the plan — mirrors the real behavior
+    // where a plan for a different session first switches the selected session.
+    const needsReviewRow = document.getElementById("needsReviewRow");
+    if (needsReviewRow) {
+      needsReviewRow.addEventListener("click", () => {
+        document.querySelectorAll(".rail-left .list-row").forEach((r) => r.classList.remove("is-active"));
+        // In a single-session mockup this is the same gate-check row; in the app
+        // it would select the plan's session before opening the panel.
+        openPlan();
+      });
+    }
+
+    // theme segment
+    document.querySelectorAll(".theme-seg button").forEach((b, i) => {
+      b.addEventListener("click", () => {
+        document.querySelectorAll(".theme-seg button").forEach((x) => x.classList.remove("is-on"));
+        b.classList.add("is-on");
+        document.documentElement.dataset.theme = i === 1 ? "light" : "dark";
+      });
+    });
+
+    // drag-to-resize (handle on the LEFT edge, between chat frame and panel)
+    const resizer = document.getElementById("resizer");
+    let dragging = false; const MIN = 380, MAX = 760;
+    resizer.addEventListener("mousedown", (e) => { dragging = true; resizer.classList.add("dragging"); document.body.classList.add("resizing"); e.preventDefault(); });
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      const right = plan.getBoundingClientRect().right;
+      let w = Math.max(MIN, Math.min(MAX, right - e.clientX));
+      plan.style.width = w + "px";
+    });
+    window.addEventListener("mouseup", () => { dragging = false; resizer.classList.remove("dragging"); document.body.classList.remove("resizing"); });
+  </script>
+</body>
+</html>

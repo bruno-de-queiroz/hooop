@@ -1,0 +1,26 @@
+# hooop install log
+
+Append-only audit log of `/hooop:setup` runs. Most recent run at the bottom.
+
+Each block records: timestamp, user choices, commands executed, exit codes, and any errors. Used by `/hooop:setup` on re-run to detect already-installed components.
+
+## Format
+
+```
+## Run: YYYY-MM-DD HH:MM:SS
+
+**Choices:**
+- Second brain: <name or skip>
+- Memory: <name or skip>
+- Code graph: <name or skip>
+- n8n: <yes or no>
+
+**Commands executed:**
+1. `<command>` → exit <code>
+2. ...
+
+**Errors / notes:**
+- ...
+```
+
+---

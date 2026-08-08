@@ -1,0 +1,325 @@
+name: hooop
+
+# Runtime services (sandboxed-agent model).
+#
+#   dashboard         — slim Next.js UI. No claude. No host-claude mounts. Talks
+#                       to agent-sandbox over a shared Unix domain socket.
+#   agent-sandbox     — owns the claude binary, the sandbox HTTP server, and the
+#                       bind-mounted Claude profile at ~/.claude/hooop/sandbox.
+#   preview-runner-N  — three interchangeable slots that run ONE session's live
+#                       preview each. No claude, no credentials, no control
+#                       socket, no route to agent-sandbox.
+#
+# dashboard + agent-sandbox share a named volume holding /var/run/hooop/ (the
+# socket and the dashboard-readable sandbox.token). agent-sandbox + the runners
+# share a second one holding /var/run/hooop-preview/ (a socket + token per slot).
+# The dashboard is NOT on that second volume: it reaches a preview over TCP on a
+# per-slot network, and has no business commanding a runner.
+#
+# Driven by the hooop CLI engine: plugins/hooop/cli/lib/stack.sh
+# (via `hooop start` / `hooop dashboard start` / `hooop sandbox start`).
+
+# Shared definition for the three preview slots. Anchored so the slots cannot
+# drift apart — they differ only by number.
+x-preview-runner: &preview-runner
+  image: hooop-preview-runner
+  build:
+    # Parent context so the Dockerfile can COPY shared/ and the Landlock policy
+    # it shares with the sandbox, alongside preview-runner/.
+    context: ..
+    dockerfile: preview-runner/Dockerfile
+  volumes:
+    # ONLY the workspace — a subpath of the profile, so `.claude/` (credentials,
+    # transcripts, events.db) is not mounted here at all. That is the point of
+    # running previews in their own container.
+    - type: bind
+      source: ${HOME}/.claude/hooop/sandbox/profile/workspace
+      target: /workspace
+    # Per-slot control socket + token, shared with agent-sandbox only.
+    - type: volume
+      source: hooop-preview-run
+      target: /var/run/hooop-preview
+  tmpfs:
+    # Small on purpose: previews write their real output into the workspace
+    # bind mount. This is scratch, and it must not survive a lease.
+    - /tmp:size=256m
+  environment:
+    HOOOP_HOST_UID: ${HOOOP_HOST_UID:-}
+    HOOOP_HOST_GID: ${HOOOP_HOST_GID:-}
+  # Reap orphans: a dev server spawns webpack/esbuild workers, and a killed
+  # subtree would otherwise leave zombies holding the app port.
+  init: true
+  # A released lease exits the supervisor deliberately (exit 0) so the container
+  # comes back with a fresh process tree. `unless-stopped` restarts on ANY exit
+  # code, which is what makes that work without handing anything a Docker socket.
+  restart: unless-stopped
+  # No `ports:` — the dashboard's front process is the only door, so preview
+  # traffic passes the same cookie gate as everything else.
+
+services:
+  agent-sandbox:
+    image: hooop-sandbox
+    build:
+      # Parent context so the Dockerfile can COPY shared/ alongside sandbox/.
+      context: ..
+      dockerfile: sandbox/Dockerfile
+
+    volumes:
+      # Sandbox-only Claude profile. Mounted at /home/agent so both
+      # ~/.claude.json (top-level config: oauthAccount, mcpServers, projects)
+      # and ~/.claude/ (state dir: credentials, plugins, sessions, hooop)
+      # land at the paths the claude CLI expects.
+      - type: bind
+        source: ${HOME}/.claude/hooop/sandbox/profile
+        target: /home/agent
+
+      # Shared UDS + token file. Dashboard reads sandbox.token from here.
+      - type: volume
+        source: hooop-run
+        target: /var/run/hooop
+
+      # Per-slot preview-runner sockets + tokens. The sandbox is the only
+      # commander of a runner; the dashboard deliberately does not mount this.
+      - type: volume
+        source: hooop-preview-run
+        target: /var/run/hooop-preview
+
+      # NOTE: the hooop plugin surface (.mcp.json, hooks/scripts, commands,
+      # agents) is now BAKED into the image at /opt/hooop (see sandbox/Dockerfile),
+      # root-owned so the `agent` user can't tamper with hook scripts. No host
+      # bind-mount needed — the image is self-contained. For live-editing plugin
+      # source in development, set HOOOP_PLUGIN_DEV=1: the hooop CLI generates an
+      # override that overlays the host repo back onto /opt/hooop (read-only).
+
+    environment:
+      HOOOP_PLUGIN_ROOT: /opt/hooop
+      # The host user's own uid/gid (from `id -u`/`id -g`, exported by the CLI
+      # engine's _hs_export_host_ids before every start/rebuild). entrypoint.sh
+      # aligns the container's `agent` user to match before chowning the
+      # bind-mounted profile, so the HOST keeps write access to its own
+      # ~/.claude/hooop/sandbox/profile afterward. Empty/absent (e.g. an older
+      # CLI, or a hand-run `docker compose up`) falls back to the baked-in
+      # uid/gid 1100 — today's behavior, unchanged.
+      HOOOP_HOST_UID: ${HOOOP_HOST_UID:-}
+      HOOOP_HOST_GID: ${HOOOP_HOST_GID:-}
+      # Boot-phase profiler (see sandbox/entrypoint.sh's _trace). Forwarded so
+      # `HOOOP_TRACE=1 hooop up`/`hooop sandbox rebuild` prints per-phase timings.
+      HOOOP_TRACE: ${HOOOP_TRACE:-}
+      # What an idle session gives back, on two thresholds and one clock (session
+      # idleness — never preview traffic or share age). At the first, the session
+      # goes dormant and its PREVIEW is released, freeing one of the three
+      # install-wide slots; the spec is remembered so the dashboard offers a
+      # one-click restart. At the second, its peer SHARES are revoked. Shares wait
+      # much longer because revocation is permanent — the ids are deleted and the
+      # host must re-invite — so it must not fire over a lunch break. Both accept
+      # 0 to disable, and both default sensibly; set them low to exercise the
+      # behaviour (e.g. 60000 / 180000).
+      HOOOP_SESSION_IDLE_TTL_MS: ${HOOOP_SESSION_IDLE_TTL_MS:-}
+      HOOOP_SESSION_SHARE_GRACE_MS: ${HOOOP_SESSION_SHARE_GRACE_MS:-}
+      # Embedding vector width for the sqlite-vec table. Default 768 matches the
+      # recommended local model (nomic-embed-text). Overridable via hooop.env
+      # (forwarded by the launcher) when using a model of a different dim, e.g.
+      # 1536 for OpenAI text-embedding-3-small — re-run /hooop:setup after changing
+      # so the vec0 table is recreated with the new dim.
+      EMBED_DIM: ${EMBED_DIM:-768}
+      # Telemetry isolation (opt-in, configured by /hooop:setup → hooop.env,
+      # forwarded by the launcher). Empty by default so this OPEN-SOURCE repo
+      # carries no org-specific endpoints or surprising outbound suppression.
+      #   HOOOP_DISABLE_TELEMETRY=1 → master switch. The entrypoint (a) exports the
+      #     full set of Claude Code opt-outs (CLAUDE_CODE_DISABLE_NONESSENTIAL_
+      #     TRAFFIC + granular + DO_NOT_TRACK + claude-mem's toggle) so everything
+      #     that CHOOSES to phone home stops at the source, and (b) blackholes in
+      #     /etc/hosts the hosts that ignore those flags: the org OTEL collector
+      #     (auto-discovered from the mounted Claude settings + this env) plus a
+      #     curated Statsig/GrowthBook denylist. Fails open (connection-refused).
+      #   HOOOP_OTEL_COLLECTOR_URL  → optional explicit host(s) to blackhole too
+      #     (first-boot before remote-settings populate, or per-tool telemetry
+      #     endpoints /hooop:setup discovers that lack an opt-out flag).
+      HOOOP_DISABLE_TELEMETRY: ${HOOOP_DISABLE_TELEMETRY:-}
+      HOOOP_OTEL_COLLECTOR_URL: ${HOOOP_OTEL_COLLECTOR_URL:-}
+      # Semantic-search embedding backend. Forwarded by the launcher from either
+      # Docker Model Runner auto-detection or ~/.claude/hooop/hooop.env
+      # (OPENAI_API_KEY / EMBEDDING_BASE_URL / EMBEDDING_MODEL), configured by
+      # /hooop:setup. Absent → BM25-only search.
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      HOOOP_EMBED_HOSTED_CONSENT: ${HOOOP_EMBED_HOSTED_CONSENT:-}
+      # GitHub CLI auth for the sandbox agent. Primary path: `hooop setup`
+      # runs `gh auth login` (device flow) INSIDE the sandbox, so the token lives
+      # in the mounted profile (~/.config/gh) and no host gh is needed. GH_TOKEN
+      # stays as an optional legacy fallback — set only if HOOOP_GH_ACCOUNT is
+      # configured and host gh is present. Absent → gh uses the profile login.
+      GH_TOKEN: ${GH_TOKEN:-}
+      # Google Workspace (gws) credentials. gws has no headless browser-callback
+      # flow, so `hooop setup` wires a GCP service-account key: it copies
+      # the key into the mounted profile and points gws at it here. The gws CLI is
+      # baked into the image; absent → gws unconfigured. (Container-side path.)
+      GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE: ${GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE:-}
+    # (Browser automation runs fully in-container via @playwright/mcp; the
+    # browser path + MCP CLI path are baked into the image as ENV in
+    # sandbox/Dockerfile — no compose env needed here.)
+
+    # Lets the sandbox reach host services over host.docker.internal — the
+    # Ollama/DMR embedders configured by /hooop:setup. (Browser automation now
+    # runs fully IN-CONTAINER via @playwright/mcp, so it no longer needs the
+    # host.) HOOOP_HOST_GATEWAY is resolved by the CLI engine (cli/lib/stack.sh):
+    # on Docker Desktop / Rancher Desktop / OrbStack it pins the daemon-provided
+    # host IP (Docker's `host-gateway` magic points at the docker0 bridge there,
+    # which can't reach the host); `host-gateway` is the correct fallback on
+    # native Linux Docker.
+    extra_hosts:
+      - "host.docker.internal:${HOOOP_HOST_GATEWAY:-host-gateway}"
+
+    # Run a real init (tini) as PID 1 so orphaned children get reaped. The
+    # sandbox spawns claude, its hooks, and plugin workers (claude-mem's bun
+    # worker, chroma) as descendants; when a claude subtree is killed (/stop,
+    # /model swap, idle-reap, a mount change) those workers reparent to PID 1.
+    # Our server runs as PID 1 and, like any non-init process, only wait()s on
+    # its own children — so an adopted orphan that exits becomes a permanent
+    # zombie. claude-mem's supervisor then reads the zombie PID as "alive",
+    # refuses to respawn, its port never opens, and its fail-closed
+    # UserPromptSubmit hook blocks every prompt. tini reaps the orphan instead.
+    init: true
+
+    restart: unless-stopped
+
+  dashboard:
+    image: hooop-dashboard
+    build:
+      # Parent context so the Dockerfile can COPY shared/ alongside dashboard/.
+      context: ..
+      dockerfile: dashboard/Dockerfile
+      # For live-editing the UI without an image rebuild, set HOOOP_DASHBOARD_DEV=1:
+      # the hooop CLI generates an override that builds the Dockerfile `dev` target
+      # (as hooop-dashboard-dev), bind-mounts the host dashboard/ + shared/ source,
+      # and runs `next dev` (HMR) via the same front process (server.mjs).
+
+    depends_on:
+      agent-sandbox:
+        condition: service_healthy
+
+    # Bind to host loopback only by default — single-user assumption. Override
+    # the publish address with HOOOP_BIND_ADDR when the dashboard must be reachable
+    # off the host loopback: e.g. HOOOP_BIND_ADDR=0.0.0.0 to expose it on all host
+    # interfaces (incl. the docker0 gateway 172.17.0.1) so a sibling container —
+    # or a containerized browser under WSL2, where the host loopback is
+    # unreachable from the bridge — can hit it. Keep it 127.0.0.1 in normal use.
+    ports:
+      - "${HOOOP_BIND_ADDR:-127.0.0.1}:${HOOOP_PORT:-7842}:7842"
+      # One published port per preview slot. Fixed rather than random because a
+      # published port must be known at container-create time; the app's own
+      # port IS randomized, and the runner's forwarder bridges the two.
+      #
+      # Published on the DASHBOARD, not on the runners: the front process
+      # authenticates every preview request (install cookie for the host, a
+      # signed share-backed cookie for a peer). Publishing straight off a runner
+      # would let anything on host loopback reach the agent's app unauthenticated.
+      #
+      # A distinct port is also a distinct ORIGIN, which is what keeps
+      # agent-written JS from reading the hooop API: a cross-origin fetch to
+      # :7842 is refused by the same-origin check in proxy.ts.
+      - "${HOOOP_BIND_ADDR:-127.0.0.1}:${HOOOP_PREVIEW_PORT_BASE:-7850}-${HOOOP_PREVIEW_PORT_LAST:-7852}:7850-7852"
+
+    extra_hosts:
+      - "host.docker.internal:${HOOOP_HOST_GATEWAY:-host-gateway}"
+
+    # `default` keeps the existing connectivity; the three preview networks are
+    # what let the front process reach each runner by name. agent-sandbox is on
+    # NONE of them, so a preview has no route to the trusted container.
+    networks:
+      - default
+      - preview-1
+      - preview-2
+      - preview-3
+
+    # Share the UDS volume so the dashboard can connect to /var/run/hooop/sandbox.sock.
+    # group_add: 1100 lets `node` join the `hooop` group that owns the socket / token.
+    volumes:
+      - type: volume
+        source: hooop-run
+        target: /var/run/hooop
+      - type: volume
+        source: hooop-dashboard-state
+        target: /var/lib/hooop/dashboard
+
+    # gid 1101 = `hooopctl`, the group that gates the control plane in the sandbox
+    # image. /var/run/hooop is 0750 hooopd:hooopctl there, so this line is what lets
+    # the dashboard traverse to the socket and read sandbox.token — and the model's
+    # `agent` uid, which is in `hooop` (1100) and deliberately NOT in `hooopctl`,
+    # gets EACCES on the same path. Moving this to 1100 would hand the model back
+    # the escape the uid split exists to close.
+    group_add:
+      - "1101"
+
+    environment:
+      HOOOP_SANDBOX_SOCKET: /var/run/hooop/sandbox.sock
+      HOOOP_SANDBOX_TOKEN_FILE: /var/run/hooop/sandbox.token
+      HOOOP_DASHBOARD_TOKEN_FILE: /var/lib/hooop/dashboard/dashboard.token
+      # Forwarded by the hooop CLI engine (cli/lib/stack.sh) from ~/.local/share/hooop/dashboard.token.
+      # The middleware (edge runtime) only reads this env; no file IO in the
+      # request hot path.
+      HOOOP_DASHBOARD_TOKEN: ${HOOOP_DASHBOARD_TOKEN:-}
+      # HMAC secret for signing/verifying ephemeral peer share tokens. Enables
+      # session sharing; absent → sharing is disabled (peer auth refuses).
+      HOOOP_PEER_SIGNING_SECRET: ${HOOOP_PEER_SIGNING_SECRET:-}
+      # Extra host headers to treat as the trusted host (comma-separated), beyond
+      # the built-in localhost allowlist. Needed when reaching the dashboard off
+      # the host loopback — e.g. HOOOP_TRUSTED_HOSTS=172.17.0.1 to drive it from a
+      # sibling container / containerized browser via the docker0 gateway. Pairs
+      # with HOOOP_BIND_ADDR above. Empty in normal (loopback-only) use.
+      HOOOP_TRUSTED_HOSTS: ${HOOOP_TRUSTED_HOSTS:-}
+
+    restart: unless-stopped
+
+  # --- Preview slots ---------------------------------------------------------
+  # Three interchangeable runners, each leased to ONE session while it previews.
+  # Isolation is per-slot and therefore per-session: separate container,
+  # separate PID namespace, and its own network so session A's app cannot reach
+  # session B's. (Cross-session FILESYSTEM isolation is Landlock's job inside
+  # the runner — the workspace bind mount is necessarily shared, since compose
+  # mounts are static. See preview-runner/lib/supervisor.ts.)
+
+  preview-runner-1:
+    <<: *preview-runner
+    environment:
+      HOOOP_HOST_UID: ${HOOOP_HOST_UID:-}
+      HOOOP_HOST_GID: ${HOOOP_HOST_GID:-}
+      HOOOP_PREVIEW_SLOT: "1"
+      HOOOP_PREVIEW_PORT: "7850"
+    networks:
+      - preview-1
+
+  preview-runner-2:
+    <<: *preview-runner
+    environment:
+      HOOOP_HOST_UID: ${HOOOP_HOST_UID:-}
+      HOOOP_HOST_GID: ${HOOOP_HOST_GID:-}
+      HOOOP_PREVIEW_SLOT: "2"
+      HOOOP_PREVIEW_PORT: "7851"
+    networks:
+      - preview-2
+
+  preview-runner-3:
+    <<: *preview-runner
+    environment:
+      HOOOP_HOST_UID: ${HOOOP_HOST_UID:-}
+      HOOOP_HOST_GID: ${HOOOP_HOST_GID:-}
+      HOOOP_PREVIEW_SLOT: "3"
+      HOOOP_PREVIEW_PORT: "7852"
+    networks:
+      - preview-3
+
+networks:
+  default:
+  # One per slot, joined by the dashboard and exactly one runner. Not
+  # `internal: true` — a preview legitimately installs dependencies and calls
+  # third-party APIs, so it needs egress.
+  preview-1:
+  preview-2:
+  preview-3:
+
+volumes:
+  hooop-run:
+  hooop-dashboard-state:
+  hooop-preview-run:

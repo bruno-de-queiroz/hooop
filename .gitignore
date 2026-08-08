@@ -1,0 +1,33 @@
+# Local Claude Code state. `**/` because a pattern containing a slash is anchored
+# to this file's directory, so the un-prefixed form missed every nested .claude/
+# — e.g. plugins/hooop/dashboard/.claude/settings.local.json showed up untracked.
+# Per-file rather than the whole .claude/ dir: shared project config (agents,
+# skills, commands, settings.json) belongs in git; only local state does not.
+**/.claude/settings.local.json
+**/.claude/cache/
+**/.claude/file-history/
+**/.claude/paste-cache/
+**/.claude/history.jsonl
+
+.serena/
+lancedb/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Scratch / experiments
+tmp/
+
+# Build output
+node_modules/
+.next/
+dist/
+*.tsbuildinfo
+
+# Runtime / fixture state
+plugins/hooop/sandbox/dist/

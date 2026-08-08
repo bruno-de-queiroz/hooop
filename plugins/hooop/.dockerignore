@@ -1,0 +1,10 @@
+# Per-package build artifacts and dependencies should not bleed across into
+# the Docker build context. The host's node_modules is platform-specific and
+# would clobber the Linux-arch versions installed inside the image.
+
+**/node_modules
+**/.next
+**/dist
+**/tsconfig.tsbuildinfo
+**/.git
+**/.DS_Store

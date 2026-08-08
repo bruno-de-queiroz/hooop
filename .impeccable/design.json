@@ -1,0 +1,233 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-05-11T20:00:00Z",
+  "title": "Design System: hooop dashboard",
+  "extensions": {
+    "colorMeta": {
+      "stage": {
+        "role": "neutral",
+        "displayName": "Stage",
+        "canonical": "oklch(0.16 0.005 280)",
+        "tonalRamp": ["#0a0a0a", "#171717", "#262626", "#404040", "#525252", "#737373", "#a3a3a3", "#d4d4d4"]
+      },
+      "panel-raised": {
+        "role": "neutral",
+        "displayName": "Panel Tint",
+        "canonical": "oklch(0.20 0.005 280)",
+        "tonalRamp": ["#0a0a0a", "#171717", "#262626", "#404040", "#525252", "#737373", "#a3a3a3", "#d4d4d4"]
+      },
+      "divider": {
+        "role": "neutral",
+        "displayName": "Divider",
+        "canonical": "oklch(0.28 0.005 280)",
+        "tonalRamp": ["#0a0a0a", "#171717", "#262626", "#404040", "#525252", "#737373", "#a3a3a3", "#d4d4d4"]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "oklch(1 0 0)",
+        "tonalRamp": ["#0a0a0a", "#171717", "#262626", "#404040", "#525252", "#737373", "#a3a3a3", "#d4d4d4", "#ffffff"]
+      },
+      "ink-mute": {
+        "role": "neutral",
+        "displayName": "Ink Mute",
+        "canonical": "oklch(0.65 0.005 280)",
+        "tonalRamp": ["#404040", "#525252", "#737373", "#a3a3a3", "#d4d4d4", "#e5e5e5", "#f5f5f5", "#fafafa"]
+      },
+      "cue-direct": {
+        "role": "primary",
+        "displayName": "Cue Direct",
+        "canonical": "oklch(0.78 0.18 305)",
+        "tonalRamp": ["#3b0764", "#581c87", "#6b21a8", "#7e22ce", "#9333ea", "#a855f7", "#c084fc", "#d8b4fe"]
+      },
+      "cue-live": {
+        "role": "secondary",
+        "displayName": "Cue Live",
+        "canonical": "oklch(0.83 0.16 75)",
+        "tonalRamp": ["#451a03", "#78350f", "#92400e", "#b45309", "#d97706", "#f59e0b", "#fbbf24", "#fcd34d"]
+      },
+      "cue-wrap": {
+        "role": "secondary",
+        "displayName": "Cue Wrap",
+        "canonical": "oklch(0.70 0.16 155)",
+        "tonalRamp": ["#022c22", "#064e3b", "#065f46", "#047857", "#059669", "#10b981", "#34d399", "#6ee7b7"]
+      },
+      "cue-sdk": {
+        "role": "secondary",
+        "displayName": "Cue SDK",
+        "canonical": "oklch(0.72 0.14 245)",
+        "tonalRamp": ["#172554", "#1e3a8a", "#1e40af", "#1d4ed8", "#2563eb", "#3b82f6", "#60a5fa", "#93c5fd"]
+      },
+      "cue-fail": {
+        "role": "secondary",
+        "displayName": "Cue Fail",
+        "canonical": "oklch(0.65 0.20 22)",
+        "tonalRamp": ["#450a0a", "#7f1d1d", "#991b1b", "#b91c1c", "#dc2626", "#ef4444", "#fb7185", "#fda4af"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Page title only. Appears exactly once per route." },
+      "title": { "displayName": "Title", "purpose": "Panel section headers (Sessions, Stack, Skills, etc.)." },
+      "body": { "displayName": "Body", "purpose": "Transcript dialog and panel readable content." },
+      "meta": { "displayName": "Meta", "purpose": "Tool calls, result previews, run history." },
+      "label": { "displayName": "Label", "purpose": "Grid labels, kbd hints, footnotes." },
+      "chip": { "displayName": "Chip", "purpose": "Namespace and entrypoint pills." }
+    },
+    "shadows": [
+      {
+        "name": "booth-spotlight",
+        "value": "0 24px 48px -12px oklch(0 0 0 / 0.6)",
+        "purpose": "The single shadow in the system. Overlays only: search modal, AgentDetail drawer, session dropdown."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-out-quart",
+        "value": "cubic-bezier(0.25, 1, 0.5, 1)",
+        "purpose": "Default easing for all state transitions (color, opacity, transform). Never bounce, never elastic."
+      },
+      {
+        "name": "duration-fast",
+        "value": "120ms",
+        "purpose": "Overlay backdrop fade, dropdown open."
+      },
+      {
+        "name": "duration-base",
+        "value": "150ms",
+        "purpose": "Button hover, row hover, chip hover, focus transitions."
+      },
+      {
+        "name": "pulse-live",
+        "value": "opacity 1.4s ease-in-out infinite",
+        "purpose": "The only allowed continuous animation. Lives on the Live cue dot when a session is busy."
+      }
+    ],
+    "breakpoints": [
+      { "name": "lg", "value": "1024px" },
+      { "name": "panel-grid-collapse", "value": "1024px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "The dashboard's macro unit. A bordered region of the stage with a section header.",
+      "html": "<section class=\"ds-panel\"><header class=\"ds-panel-header\"><span class=\"ds-panel-icon\" aria-hidden=\"true\"><svg viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z\"/></svg></span>Sessions<span class=\"ds-panel-count\">(3)</span></header><div class=\"ds-panel-body\">…rows…</div></section>",
+      "css": ".ds-panel { background: #0a0a0a; color: #e5e5e5; border: 1px solid #262626; border-radius: 8px; padding: 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; } .ds-panel-header { display: flex; align-items: center; gap: 8px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; font-weight: 600; color: #e5e5e5; margin-bottom: 12px; } .ds-panel-icon { display: inline-flex; color: #e5e5e5; } .ds-panel-count { color: #737373; font-weight: 400; }"
+    },
+    {
+      "name": "Row",
+      "kind": "custom",
+      "refersTo": "row",
+      "description": "Atomic line of data inside a panel: one session, skill, MCP, event.",
+      "html": "<button class=\"ds-row\" type=\"button\"><span class=\"ds-row-glyph\" aria-hidden=\"true\">●</span><span class=\"ds-row-label\">workspace</span><span class=\"ds-row-chip\">cli</span><span class=\"ds-row-time\">2m</span></button>",
+      "css": ".ds-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px; background: transparent; color: #d4d4d4; border: none; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; cursor: pointer; transition: background-color 150ms cubic-bezier(0.25, 1, 0.5, 1); text-align: left; } .ds-row:hover { background: #171717; } .ds-row:focus-visible { outline: 1px solid #404040; outline-offset: -1px; } .ds-row-glyph { color: #10b981; flex-shrink: 0; } .ds-row-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ds-row-chip { font-size: 9px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; background: #171717; color: #a3a3a3; border-radius: 4px; padding: 2px 6px; flex-shrink: 0; } .ds-row-time { font-size: 10px; color: #737373; font-variant-numeric: tabular-nums; flex-shrink: 0; }"
+    },
+    {
+      "name": "Chip (cue)",
+      "kind": "chip",
+      "refersTo": "chip-cue-direct",
+      "description": "Status-bearing pill: skill, SDK, stdio, http, sse. Cue color carries the meaning.",
+      "html": "<span class=\"ds-chip-cue ds-chip-cue--direct\">skill</span>",
+      "css": ".ds-chip-cue { display: inline-flex; align-items: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; border-radius: 4px; padding: 2px 6px; flex-shrink: 0; } .ds-chip-cue--direct { background: rgba(192, 132, 252, 0.15); color: #d8b4fe; } .ds-chip-cue--sdk { background: rgba(96, 165, 250, 0.15); color: #93c5fd; } .ds-chip-cue--live { background: rgba(251, 191, 36, 0.15); color: #fcd34d; }"
+    },
+    {
+      "name": "Button (primary)",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The Run / Save affordance. One of two button variants; if a third feels needed the affordance is wrong, not the button.",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">Run</button>",
+      "css": ".ds-btn-primary { background: #171717; color: #ffffff; border: none; border-radius: 4px; padding: 4px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; cursor: pointer; transition: background-color 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-btn-primary:hover { background: #262626; } .ds-btn-primary:focus-visible { outline: 1px solid #525252; outline-offset: 1px; } .ds-btn-primary:active { background: #404040; }"
+    },
+    {
+      "name": "Button (ghost)",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Cancel / Dismiss. No fill, brightens on hover. The recessive companion to Primary.",
+      "html": "<button class=\"ds-btn-ghost\" type=\"button\">Cancel</button>",
+      "css": ".ds-btn-ghost { background: transparent; color: #737373; border: none; border-radius: 4px; padding: 4px 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; cursor: pointer; transition: color 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-btn-ghost:hover { color: #e5e5e5; } .ds-btn-ghost:focus-visible { outline: 1px solid #404040; outline-offset: 1px; }"
+    },
+    {
+      "name": "Input (text)",
+      "kind": "input",
+      "refersTo": "input-text",
+      "description": "Filter, search, skill args. A single shape; never a second variant.",
+      "html": "<input class=\"ds-input-text\" type=\"text\" placeholder=\"filter…\" />",
+      "css": ".ds-input-text { background: #0a0a0a; color: #e5e5e5; border: 1px solid #262626; border-radius: 4px; padding: 6px 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; width: 100%; transition: border-color 150ms cubic-bezier(0.25, 1, 0.5, 1); } .ds-input-text::placeholder { color: #525252; } .ds-input-text:focus { outline: none; border-color: #525252; } .ds-input-text:focus-visible { outline: 1px solid #404040; outline-offset: -1px; }"
+    },
+    {
+      "name": "Transcript line: user prompt",
+      "kind": "custom",
+      "description": "The brightest pixel in the room. User prompt with the Cue Direct '>' glyph and bold ink text.",
+      "html": "<div class=\"ds-tx-user\"><span class=\"ds-tx-user-glyph\" aria-hidden=\"true\">&gt;</span><span class=\"ds-tx-user-text\">Use the stack-doctor agent to check my install</span></div>",
+      "css": ".ds-tx-user { display: flex; gap: 8px; padding: 4px 0; color: #ffffff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 600; min-width: 0; } .ds-tx-user-glyph { color: #c084fc; flex-shrink: 0; user-select: none; } .ds-tx-user-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }"
+    },
+    {
+      "name": "Transcript line: tool call",
+      "kind": "custom",
+      "description": "PostToolUse rendering. Bullet + tool name + args, with a brighter '⎿ result' continuation below.",
+      "html": "<div class=\"ds-tx-tool\"><div class=\"ds-tx-tool-head\"><span class=\"ds-tx-tool-glyph\" aria-hidden=\"true\">●</span><span class=\"ds-tx-tool-name\">Bash</span><span class=\"ds-tx-tool-args\">(npm install)</span></div><div class=\"ds-tx-tool-result\"><span class=\"ds-tx-tool-glyph\" aria-hidden=\"true\">⎿</span><span>added 234 packages in 23s</span></div></div>",
+      "css": ".ds-tx-tool { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; padding: 2px 0; } .ds-tx-tool-head { display: flex; gap: 8px; align-items: baseline; } .ds-tx-tool-glyph { flex-shrink: 0; user-select: none; } .ds-tx-tool-head .ds-tx-tool-glyph { color: rgba(16, 185, 129, 0.7); } .ds-tx-tool-name { color: #a3a3a3; } .ds-tx-tool-args { color: #737373; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-tx-tool-result { display: flex; gap: 8px; color: #d4d4d4; font-size: 12px; } .ds-tx-tool-result .ds-tx-tool-glyph { color: #525252; }"
+    },
+    {
+      "name": "Transcript: sub-agent bucket",
+      "kind": "custom",
+      "description": "Signature component. Collapsed by default: Agent + description + model on one line, '⎿ Done · duration' below, click expands children indented under a left rule.",
+      "html": "<div class=\"ds-tx-agent\"><div class=\"ds-tx-agent-head\"><span class=\"ds-tx-agent-glyph\" aria-hidden=\"true\">●</span><span class=\"ds-tx-agent-label\">Agent</span><span class=\"ds-tx-agent-desc\">(Inspect auth module for issues)</span><span class=\"ds-tx-agent-model\">Haiku 4.5</span></div><div class=\"ds-tx-agent-result\"><span class=\"ds-tx-agent-glyph\" aria-hidden=\"true\">⎿</span><span class=\"ds-tx-agent-done\">Done · 1m 41s</span><span class=\"ds-tx-agent-hint\">(click to expand)</span></div></div>",
+      "css": ".ds-tx-agent { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; padding: 4px 0; cursor: pointer; transition: background-color 150ms cubic-bezier(0.25, 1, 0.5, 1); border-radius: 4px; } .ds-tx-agent:hover { background: rgba(23, 23, 23, 0.4); } .ds-tx-agent-head { display: flex; gap: 8px; align-items: baseline; } .ds-tx-agent-glyph { flex-shrink: 0; user-select: none; color: #c084fc; } .ds-tx-agent-label { color: #e5e5e5; font-weight: 600; } .ds-tx-agent-desc { color: #737373; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-tx-agent-model { color: #a3a3a3; flex-shrink: 0; } .ds-tx-agent-result { display: flex; gap: 8px; font-size: 11px; color: #737373; align-items: baseline; } .ds-tx-agent-result .ds-tx-agent-glyph { color: #525252; } .ds-tx-agent-done { color: #d4d4d4; } .ds-tx-agent-hint { color: #525252; font-size: 10px; margin-left: 8px; }"
+    },
+    {
+      "name": "Transcript: AskUserQuestion",
+      "kind": "custom",
+      "description": "Pause-and-decide moment. Amber '?' glyph + question, '↳' below with the answer in ink-quiet.",
+      "html": "<div class=\"ds-tx-ask\"><div class=\"ds-tx-ask-q\"><span class=\"ds-tx-ask-q-glyph\" aria-hidden=\"true\">?</span><span>Confirm the register: this surface is the dashboard. Match?</span></div><div class=\"ds-tx-ask-a\"><span class=\"ds-tx-ask-a-glyph\" aria-hidden=\"true\">↳</span><span>Product, design serves the tool</span></div></div>",
+      "css": ".ds-tx-ask { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #737373; padding: 2px 0; } .ds-tx-ask-q { display: flex; gap: 8px; align-items: baseline; } .ds-tx-ask-q-glyph { color: #fbbf24; font-weight: 600; flex-shrink: 0; user-select: none; } .ds-tx-ask-a { display: flex; gap: 8px; padding-left: 16px; align-items: baseline; } .ds-tx-ask-a-glyph { color: rgba(251, 191, 36, 0.6); flex-shrink: 0; user-select: none; } .ds-tx-ask-a > span:last-child { color: #d4d4d4; flex: 1; min-width: 0; overflow-wrap: anywhere; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Director's Booth",
+    "overview": "The dashboard is the calm room behind a live performance. The operator watches, never performs. The booth is dim so the cues stand out. Information is plentiful but it does not shout; the eye rests until something asks for attention, and then it gets exactly the attention it needs.\n\nThis system explicitly rejects generic SaaS admin templates, crypto-hacker neon, Notion-style consumer warmth, and AI-product purple-gradient heroes. When a tile, chip, or panel starts edging toward any of those, rewrite it, do not tune it.\n\nDensity is the trade. Following Linear and Raycast more than Datadog: many things on screen, every pixel earned, no decorative chrome between user and data. Monochrome by default; semantic color appears only where it carries meaning.",
+    "keyCharacteristics": [
+      "Dark surface, near-black, slightly cool. Light cards on dark booth, never the inverse.",
+      "Monospace as the body voice; system sans only for the page title.",
+      "Five cue colors, each tied to one meaning (live, direct, wrap, sdk, fail). Never decorative.",
+      "Flat by default; one ambient shadow reserved for overlays.",
+      "No gradients anywhere. No glass. No bouncy motion. No oversized rounded corners."
+    ],
+    "rules": [
+      { "name": "The Rationed Color Rule", "body": "Cue colors are reserved for state, never for character. There are exactly five cue meanings; everything else is monochrome.", "section": "colors" },
+      { "name": "The Brightest Pixel Rule", "body": "Only the user's prompt text is rendered in true white. Assistant text drops one step. Tool calls drop two. The user always wins the contrast contest.", "section": "colors" },
+      { "name": "The No-Decorative-Tint Rule", "body": "Backgrounds use only Stage, Panel Tint, and panel-raised. No tinted backgrounds in cue colors. State changes are conveyed by glyph color and small chip pills, not by surface color.", "section": "colors" },
+      { "name": "The Monospace Voice Rule", "body": "Everything operational is monospace. System sans is reserved for the page title.", "section": "typography" },
+      { "name": "The Tabular Numerals Rule", "body": "All numeric content must align across rows. Numbers that don't align make the operator's eye work, which violates 'calm.'", "section": "typography" },
+      { "name": "The Flat-At-Rest Rule", "body": "Panels at rest carry no shadow. Hover introduces a half-step background lift, never a shadow.", "section": "elevation" },
+      { "name": "The Shadow-Means-Lifted Rule", "body": "Any element with a shadow is, definitionally, above the page. If a shadow appears on something in-page, that is a category error.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do use the cue color vocabulary only for state, never for decoration.",
+      "Do make the user's prompt line the brightest pixel in the room.",
+      "Do keep panels flat. Hover is a half-step tonal lift, never a shadow.",
+      "Do use monospace for every operational text. System sans only for the page title.",
+      "Do keep rows tight (4px padding, 12px line-height).",
+      "Do use Lucide icons at 14px in panel headers, 11px inside rows.",
+      "Do show time on hover only via the title attribute.",
+      "Do put the model name right-aligned on Agent rows.",
+      "Do keep the AskUserQuestion '?' in Cue Live, semibold."
+    ],
+    "donts": [
+      "Don't introduce purple-to-pink gradients, glowing borders, glassmorphism, or hero metric templates.",
+      "Don't drift into generic SaaS admin shell: identical KPI cards, four-column dashboards, heavy sidebars.",
+      "Don't ship the crypto/hacker neon aesthetic.",
+      "Don't drift toward Notion-style consumer warmth.",
+      "Don't use border-left greater than 1px as a colored accent stripe.",
+      "Don't use background-clip text with a gradient.",
+      "Don't add shadows to non-overlay components.",
+      "Don't introduce a third button variant beyond Primary and Ghost.",
+      "Don't animate layout properties.",
+      "Don't decorate panels with cue colors.",
+      "Don't add a third typography family.",
+      "Don't invent a 'marketing' empty state."
+    ]
+  }
+}

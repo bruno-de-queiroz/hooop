@@ -1,0 +1,33 @@
+// NOTE: the build passes `--tsconfig=tsconfig.json` explicitly, and that flag
+// is load-bearing rather than tidy. esbuild otherwise resolves `paths` using
+// the NEAREST tsconfig to each importing file, and this bundle deliberately
+// pulls in `sandbox/lib/landlock-policy.ts` (shared with the sandbox by copy —
+// see the Dockerfile). In a local checkout that file sits next to
+// `sandbox/tsconfig.json`, which happens to define the same `@shared/*`
+// mapping, so the build works by accident. The image copies only the two .ts
+// files and no sandbox tsconfig, so the mapping vanishes and `@shared/logger`
+// fails to resolve. Forcing one tsconfig for every file makes both layouts
+// behave the same.
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["esnext"],
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "incremental": true,
+    "paths": {
+      "@/*": ["./*"],
+      "@shared/*": ["../shared/*"],
+      "@sandbox/*": ["../sandbox/*"]
+    },
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["**/*.ts", "../shared/*.ts"],
+  "exclude": ["node_modules", "dist", "../shared/**/*.test.ts"]
+}

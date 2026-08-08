@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "outDir": "./dist",
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": true
+  },
+  "include": ["server.ts", "auth.ts", "rate-limit.ts", "lib/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+}

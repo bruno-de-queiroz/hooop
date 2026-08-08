@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "hooop-marketplace",
+  "description": "Self-hosted marketplace for the hooop plugin. Install with: /plugin marketplace add bruno-de-queiroz/hooop",
+  "owner": {
+    "name": "Bruno Queiroz",
+    "email": "3382621+bruno-de-queiroz@users.noreply.github.com"
+  },
+  "plugins": [
+    {
+      "name": "hooop",
+      "description": "Being alone is not a requirement. A sandboxed and web harness on top of claude code.",
+      "author": {
+        "name": "Bruno Queiroz"
+      },
+      "category": "productivity",
+      "source": "./plugins/hooop",
+      "homepage": "https://github.com/bruno-de-queiroz/hooop"
+    }
+  ]
+}

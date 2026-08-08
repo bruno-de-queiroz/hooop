@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>hooop · Plan panel (docked sibling) mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root, [data-theme="dark"] {
+    --bg: 20 18 16; --window: 32 30 27; --rail: 26 24 21; --center: 34 31 28;
+    --elevated: 43 40 37; --elevated-2: 51 47 43;
+    --sunken: rgba(0,0,0,0.28); --divider: rgba(255,255,255,0.07);
+    --ink: 237 232 224; --ink-soft: 203 196 185; --ink-mute: 148 141 130;
+    --ink-faint: 107 100 91; --ink-hush: 76 70 62;
+    --accent: 226 102 167; --accent-press: 199 90 147;
+    --live: 245 181 68; --wrap: 62 207 142; --sdk: 90 162 240;
+    --direct: 192 132 252; --fail: 251 113 133;
+    --host-bubble: 47 111 82; --peer-bubble: 69 137 212;
+    --font-sans: "Archivo", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  }
+  [data-theme="light"] {
+    --bg: 233 235 239; --window: 246 247 249; --rail: 238 240 244; --center: 253 253 254;
+    --elevated: 233 235 240; --elevated-2: 222 226 232;
+    --sunken: rgba(17,24,39,0.05); --divider: rgba(17,24,39,0.09);
+    --ink: 20 22 27; --ink-soft: 44 49 58; --ink-mute: 84 91 103;
+    --ink-faint: 130 138 150; --ink-hush: 169 175 186;
+    --accent: 226 102 167; --accent-press: 199 90 147;
+    --live: 180 83 9; --wrap: 23 151 106; --sdk: 59 118 207;
+    --direct: 138 87 207; --fail: 216 87 107;
+    --host-bubble: 46 125 90; --peer-bubble: 59 118 207;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: var(--font-sans);
+    background: rgb(var(--bg));
+    color: rgb(var(--ink));
+    padding: 12px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .window {
+    height: 100%; display: flex; flex-direction: column;
+    background: rgb(var(--window));
+    border-radius: 22px; overflow: hidden;
+    box-shadow: 0 24px 60px -20px rgba(0,0,0,0.7);
+  }
+  /* Title bar */
+  .titlebar {
+    height: 48px; flex: 0 0 auto; display: flex; align-items: center;
+    gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--divider);
+  }
+  .logo-mark { width: 18px; height: 18px; border-radius: 6px;
+    background: rgb(var(--accent)); display: inline-block; }
+  .brand { font-weight: 700; letter-spacing: -0.02em; }
+  .titlebar .spacer { margin-left: auto; }
+  .search {
+    background: var(--sunken); border: 1px solid var(--divider);
+    border-radius: 10px; color: rgb(var(--ink-mute)); font-size: 12px;
+    padding: 6px 12px; width: 200px; font-family: var(--font-sans);
+  }
+  .icon-btn {
+    width: 32px; height: 32px; display: inline-flex; align-items: center;
+    justify-content: center; color: rgb(var(--ink-mute)); border: none;
+    background: transparent; border-radius: 9px; cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .icon-btn:hover { color: rgb(var(--ink)); background: rgb(var(--elevated)); }
+
+  /* Main row */
+  .row { flex: 1 1 auto; min-height: 0; display: flex; }
+
+  /* Rails */
+  .rail { flex: 0 0 auto; display: flex; flex-direction: column;
+    background: rgb(var(--rail)); }
+  .rail-left { width: 17rem; border-right: 1px solid var(--divider); }
+  .rail-right { width: 19rem; border-left: 1px solid var(--divider); }
+  .rail-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px; }
+  .rail-foot { flex: 0 0 auto; border-top: 1px solid var(--divider);
+    padding: 10px 12px; display: flex; align-items: center; gap: 8px; }
+
+  .section-title { font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: rgb(var(--ink-faint)); margin: 4px 2px 8px; }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+  .tab { font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+    color: rgb(var(--ink-faint)); padding: 5px 9px; border-radius: 8px;
+    border: none; background: transparent; cursor: pointer; font-family: var(--font-sans); }
+  .tab.is-on { color: rgb(var(--accent)); background: rgb(var(--elevated)); }
+  .badge { display: inline-flex; align-items: center; justify-content: center;
+    min-width: 16px; height: 16px; padding: 0 5px; border-radius: 999px;
+    font-size: 10px; font-weight: 700; margin-left: 5px;
+    background: color-mix(in oklab, rgb(var(--accent)) 22%, rgb(var(--elevated)));
+    color: rgb(var(--accent)); }
+
+  .list-row { border-radius: 11px; color: rgb(var(--ink-soft));
+    padding: 9px 10px; cursor: pointer; transition: background .12s; margin-bottom: 2px; }
+  .list-row:hover { background: rgb(var(--elevated)); }
+  .list-row.is-active { background: color-mix(in oklab, rgb(var(--accent)) 14%, transparent); }
+  .list-row .r-title { display: flex; align-items: center; gap: 8px;
+    font-size: 13px; font-weight: 600; color: rgb(var(--ink)); }
+  .list-row .r-sub { font-size: 11px; color: rgb(var(--ink-mute)); margin-top: 3px; }
+  .dot { width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto; }
+  .dot.live { background: rgb(var(--live)); }
+  .dot.wrap { background: rgb(var(--wrap)); }
+  .dot.mute { background: rgb(var(--ink-hush)); }
+
+  .avatar { width: 28px; height: 28px; border-radius: 999px; flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 600; font-size: 12px; background: rgb(var(--elevated));
+    color: rgb(var(--ink-soft)); }
+  .avatar.acc { background: color-mix(in oklab, rgb(var(--accent)) 18%, rgb(var(--elevated))); color: rgb(var(--accent)); }
+  .avatar.wrap { background: color-mix(in oklab, rgb(var(--wrap)) 18%, rgb(var(--elevated))); color: rgb(var(--wrap)); }
+  .avatar.sdk { background: color-mix(in oklab, rgb(var(--sdk)) 26%, rgb(var(--elevated))); color: rgb(var(--sdk)); }
+
+  /* Center pane */
+  .center { flex: 1 1 0; min-width: 22rem; display: flex; flex-direction: column;
+    background: rgb(var(--center)); }
+  .sess-head { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 12px 18px; border-bottom: 1px solid var(--divider); }
+  .sess-title { font-size: 14px; font-weight: 700; }
+  .sess-sub { font-size: 11px; color: rgb(var(--ink-mute)); }
+  .status-pill { font-size: 11px; font-weight: 600; color: rgb(var(--wrap));
+    display: inline-flex; align-items: center; gap: 5px; }
+  .stats { flex: 0 0 auto; display: flex; gap: 22px; padding: 10px 18px;
+    border-bottom: 1px solid var(--divider); }
+  .stat .k { font-size: 10px; letter-spacing: .05em; text-transform: uppercase;
+    color: rgb(var(--ink-faint)); }
+  .stat .v { font-size: 13px; font-weight: 600; margin-top: 2px; }
+  .stat .v.mono { font-family: var(--font-mono); }
+  .plus { color: rgb(var(--wrap)); } .minus { color: rgb(var(--fail)); }
+
+  .transcript { flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .msg { display: flex; gap: 10px; max-width: 640px; }
+  .msg.right { align-self: flex-end; flex-direction: row-reverse; }
+  .who { font-size: 11px; color: rgb(var(--ink-mute)); margin-bottom: 4px; }
+  .bubble { border-radius: 16px; padding: 10px 14px; font-size: 13px; line-height: 1.5; }
+  .bubble.assistant { background: rgb(var(--elevated)); color: rgb(var(--ink-soft)); border-bottom-left-radius: 5px; }
+  .bubble.host { background: rgb(var(--host-bubble)); color: #fff; border-bottom-right-radius: 5px; }
+  .tool-card { background: var(--sunken); border: 1px solid var(--divider);
+    border-radius: 12px; padding: 10px 12px; margin-top: 8px; display: flex;
+    align-items: center; gap: 8px; font-size: 12px; color: rgb(var(--ink-soft)); cursor: pointer; }
+  .tool-card .arrow { margin-left: auto; color: rgb(var(--ink-faint)); }
+
+  .composer { flex: 0 0 auto; padding: 12px 18px 16px; }
+  .composer .field { background: var(--sunken); border: 1px solid var(--divider);
+    border-radius: 12px; padding: 12px 12px; display: flex; align-items: center; gap: 10px; }
+  .composer input { flex: 1; background: transparent; border: none; outline: none;
+    color: rgb(var(--ink)); font-family: var(--font-sans); font-size: 13px; }
+  .composer input::placeholder { color: rgb(var(--ink-hush)); }
+  .send { width: 34px; height: 34px; border-radius: 10px; border: none; cursor: pointer;
+    background: rgb(var(--accent)); color: #fff; display: inline-flex;
+    align-items: center; justify-content: center; }
+
+  /* Plan panel: docked sibling, resizable */
+  .plan {
+    position: relative; flex: 0 0 auto; width: 480px; min-width: 360px; max-width: 760px;
+    display: flex; flex-direction: column; background: rgb(var(--window));
+    border-left: 1px solid var(--divider);
+    transition: width .28s cubic-bezier(.22,1,.36,1), opacity .2s ease;
+  }
+  .plan.collapsed { width: 0 !important; min-width: 0; opacity: 0; overflow: hidden;
+    border-left-color: transparent; }
+  /* drag handle on the LEFT edge (between chat frame and panel) */
+  .resizer { position: absolute; left: -3px; top: 0; bottom: 0; width: 6px;
+    cursor: col-resize; z-index: 5; }
+  .resizer::after { content: ""; position: absolute; left: 2px; top: 0; bottom: 0;
+    width: 2px; background: transparent; transition: background .15s; }
+  .resizer:hover::after, .resizer.dragging::after { background: rgb(var(--accent)); }
+  body.resizing { cursor: col-resize; user-select: none; }
+  body.resizing .plan { transition: none; }
+
+  .plan-head { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px; border-bottom: 1px solid var(--divider); }
+  .plan-head .p-icon { width: 26px; height: 26px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: color-mix(in oklab, rgb(var(--accent)) 18%, rgb(var(--elevated)));
+    color: rgb(var(--accent)); font-size: 13px; }
+  .plan-head .p-title { font-size: 14px; font-weight: 700; }
+  .plan-head .p-sub { font-size: 11px; color: rgb(var(--ink-mute)); }
+
+  .plan-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 0; }
+  .plan-doc { display: grid; grid-template-columns: 40px 1fr; }
+  .plan-doc .ln { text-align: right; padding: 0 10px; font-family: var(--font-mono);
+    font-size: 11px; color: rgb(var(--ink-hush)); user-select: none; line-height: 1.9; }
+  .plan-doc .tx { padding-right: 16px; line-height: 1.9; font-size: 13px; color: rgb(var(--ink-soft)); }
+  .plan-doc h3 { color: rgb(var(--accent)); font-size: 13px; margin: 4px 0; font-weight: 700; }
+  .plan-doc .h1 { color: rgb(var(--ink)); font-weight: 700; font-size: 14px; }
+  .plan-doc .bullet::before { content: "•"; color: rgb(var(--ink-faint)); margin-right: 8px; }
+  .plan-doc .row-hl { background: color-mix(in oklab, rgb(var(--live)) 12%, transparent);
+    border-left: 2px solid rgb(var(--live)); }
+
+  .comment {
+    margin: 6px 16px 10px 40px; background: rgb(var(--elevated));
+    border: 1px solid var(--divider); border-radius: 12px; padding: 10px 12px;
+  }
+  .comment .c-head { display: flex; align-items: center; gap: 8px; }
+  .comment .c-name { font-size: 12px; font-weight: 600; }
+  .comment .c-time { font-size: 11px; color: rgb(var(--ink-mute)); }
+  .comment .c-resolve { margin-left: auto; font-size: 11px; color: rgb(var(--wrap));
+    background: none; border: none; cursor: pointer; }
+  .comment .c-body { font-size: 12px; color: rgb(var(--ink-soft)); margin-top: 6px; }
+
+  .plan-foot { flex: 0 0 auto; border-top: 1px solid var(--divider); padding: 14px 16px; }
+  .note { width: 100%; background: var(--sunken); border: 1px solid var(--divider);
+    border-radius: 10px; color: rgb(var(--ink)); font-family: var(--font-sans);
+    font-size: 12px; padding: 8px 10px; resize: none; outline: none; margin-bottom: 10px; }
+  .note::placeholder { color: rgb(var(--ink-hush)); }
+  .plan-actions { display: flex; gap: 10px; }
+  .btn { border-radius: 10px; padding: 9px 14px; font-size: 13px; font-weight: 600;
+    cursor: pointer; border: none; font-family: var(--font-sans);
+    display: inline-flex; align-items: center; gap: 7px; }
+  .btn.accent { background: rgb(var(--wrap)); color: #06130d; flex: 1; justify-content: center; }
+  .btn.ghost { background: rgb(var(--elevated)); color: rgb(var(--ink-soft)); flex: 1; justify-content: center; }
+  .btn.ghost:hover { background: rgb(var(--elevated-2)); }
+
+  /* Right rail cards */
+  .card { background: rgb(var(--elevated)); border: 1px solid var(--divider);
+    border-radius: 14px; padding: 12px 14px; margin-bottom: 12px; }
+  .summary-card { background: linear-gradient(180deg,
+      color-mix(in oklab, rgb(var(--accent)) 8%, rgb(var(--elevated))), rgb(var(--elevated)));
+    border: 1px solid color-mix(in oklab, rgb(var(--accent)) 20%, var(--divider)); }
+  .card h4 { margin: 0 0 8px; font-size: 13px; font-weight: 700; display: flex; align-items: center; }
+  .kv { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; }
+  .kv .k { color: rgb(var(--ink-mute)); }
+  .kv .v { color: rgb(var(--ink)); font-weight: 500; }
+  .skill { margin: 8px 0; }
+  .skill .s-top { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
+  .bar { height: 5px; border-radius: 999px; background: var(--sunken); overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: rgb(var(--accent)); border-radius: 999px; }
+  .agent { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+  .agent .a-name { font-size: 13px; font-weight: 600; }
+  .agent .a-sub { font-size: 11px; color: rgb(var(--ink-mute)); }
+  .agent .a-dot { margin-left: auto; }
+
+  /* Floating reopen button (shown when collapsed) */
+  .reopen { position: fixed; right: 24px; bottom: 24px; display: none;
+    background: rgb(var(--accent)); color: #fff; border: none; cursor: pointer;
+    border-radius: 999px; padding: 12px 18px; font-family: var(--font-sans);
+    font-weight: 600; font-size: 13px; box-shadow: 0 12px 30px -8px rgba(0,0,0,.6); }
+  body.plan-closed .reopen { display: inline-flex; }
+
+  .hint { position: fixed; left: 24px; bottom: 20px; font-size: 11px;
+    color: rgb(var(--ink-faint)); }
+  .theme-toggle { font-size: 11px; }
+</style>
+</head>
+<body>
+  <div class="window">
+    <!-- Title bar -->
+    <div class="titlebar">
+      <span class="logo-mark"></span>
+      <span class="brand">hooop</span>
+      <div class="spacer"></div>
+      <input class="search" placeholder="Search sessions…" />
+      <button class="icon-btn theme-toggle" id="themeToggle" title="Toggle theme">◐</button>
+    </div>
+
+    <div class="row">
+      <!-- Left rail -->
+      <aside class="rail rail-left">
+        <div class="rail-body">
+          <div class="tabs">
+            <button class="tab is-on">Sessions</button>
+            <button class="tab">Needs review <span class="badge">1</span></button>
+          </div>
+          <input class="search" style="width:100%;margin-bottom:12px" placeholder="Filter…" />
+          <div class="section-title">Today</div>
+          <div class="list-row is-active">
+            <div class="r-title"><span class="dot live"></span> API refactor initiative</div>
+            <div class="r-sub">You, Maya, Agent Codex · active</div>
+          </div>
+          <div class="list-row">
+            <div class="r-title"><span class="dot mute"></span> Fix payment webhook</div>
+            <div class="r-sub">You, Jordan · closed</div>
+          </div>
+          <div class="list-row">
+            <div class="r-title"><span class="dot mute"></span> Add index for invoices</div>
+            <div class="r-sub">You, Agent Postgres · closed</div>
+          </div>
+          <div class="list-row">
+            <div class="r-title"><span class="dot mute"></span> Improve dashboard queries</div>
+            <div class="r-sub">You, Sam · yesterday</div>
+          </div>
+          <div class="list-row">
+            <div class="r-title"><span class="dot mute"></span> Rate limiting edge cases</div>
+            <div class="r-sub">You, Agent Shield · yesterday</div>
+          </div>
+        </div>
+        <div class="rail-foot">
+          <span class="avatar">S</span>
+          <div style="font-size:12px"><div style="font-weight:600">Bruno</div>
+          <div style="color:rgb(var(--ink-mute))">Host</div></div>
+          <button class="icon-btn" style="margin-left:auto">⚙</button>
+        </div>
+      </aside>
+
+      <!-- Center chat frame -->
+      <main class="center">
+        <div class="sess-head">
+          <div style="flex:1">
+            <div class="sess-title">API refactor initiative</div>
+            <div class="sess-sub">Created May 19 · You, Maya, Agent Codex</div>
+          </div>
+          <span class="status-pill"><span class="dot wrap"></span> Active</span>
+          <button class="icon-btn" title="Participants">👥 3</button>
+          <button class="icon-btn" title="More">⋯</button>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="k">Duration</div><div class="v">1h 24m</div></div>
+          <div class="stat"><div class="k">Messages</div><div class="v">42</div></div>
+          <div class="stat"><div class="k">Files</div><div class="v">8</div></div>
+          <div class="stat"><div class="k">Lines</div><div class="v mono"><span class="plus">+312</span> <span class="minus">−87</span></div></div>
+          <div class="stat"><div class="k">Tests</div><div class="v" style="color:rgb(var(--wrap))">18 passed</div></div>
+        </div>
+
+        <div class="transcript">
+          <div class="msg">
+            <span class="avatar wrap">C</span>
+            <div><div class="who">Agent Codex · 10:21 AM</div>
+              <div class="bubble assistant">I've reviewed the codebase and identified several opportunities to improve the API layer.</div>
+            </div>
+          </div>
+          <div class="msg right">
+            <span class="avatar">Y</span>
+            <div><div class="who" style="text-align:right">You · 10:22 AM</div>
+              <div class="bubble host">Great — can you put together a plan for the refactor?</div>
+            </div>
+          </div>
+          <div class="msg">
+            <span class="avatar wrap">C</span>
+            <div><div class="who">Agent Codex · 10:23 AM</div>
+              <div class="bubble assistant">Sure. I've drafted a plan with phases, risks, and a testing strategy.
+                <div class="tool-card">📄 API refactor plan · plan document <span class="arrow">›</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="msg right">
+            <span class="avatar">Y</span>
+            <div><div class="who" style="text-align:right">You · 10:24 AM</div>
+              <div class="bubble host">Looks good. Let's review.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer">
+          <div class="field">
+            <button class="icon-btn">＋</button>
+            <input placeholder="Message the session…" />
+            <button class="icon-btn">@</button>
+            <button class="send">➤</button>
+          </div>
+        </div>
+      </main>
+
+      <!-- Plan panel: docked sibling between chat frame and right rail -->
+      <section class="plan" id="plan">
+        <div class="resizer" id="resizer" title="Drag to resize"></div>
+        <div class="plan-head">
+          <span class="p-icon">▤</span>
+          <div style="flex:1">
+            <div class="p-title">API refactor plan</div>
+            <div class="p-sub">Proposed by Agent Codex · session: API refactor initiative</div>
+          </div>
+          <button class="icon-btn" id="closePlan" title="Close">✕</button>
+        </div>
+
+        <div class="plan-body">
+          <div class="plan-doc">
+            <div class="ln">1<br>2<br>3<br>4<br>5<br>6<br>7<br>8<br>9<br>10<br>11<br>12<br>13</div>
+            <div class="tx">
+              <div class="h1"># API refactor plan</div>
+              <div>&nbsp;</div>
+              <h3>## Goal</h3>
+              <div>Improve API scalability, maintainability, and DX.</div>
+              <div>&nbsp;</div>
+              <h3>## Scope</h3>
+              <div class="bullet">Refactor REST endpoints</div>
+              <div class="bullet">Standardize error handling</div>
+              <div class="bullet">Improve pagination</div>
+              <div class="bullet row-hl">Introduce service-layer abstraction</div>
+              <div>&nbsp;</div>
+              <h3>## Phases</h3>
+            </div>
+          </div>
+
+          <!-- inline anchored comment -->
+          <div class="comment">
+            <div class="c-head">
+              <span class="avatar sdk" style="width:22px;height:22px;font-size:11px">S</span>
+              <span class="c-name">Sarah</span>
+              <span class="c-time">10:24 AM</span>
+              <button class="c-resolve">Resolve</button>
+            </div>
+            <div class="c-body">Should we consider a repository pattern here instead?</div>
+          </div>
+
+          <div class="plan-doc">
+            <div class="ln">14<br>15<br>16<br>17<br>18<br>19<br>20</div>
+            <div class="tx">
+              <div class="bullet">Phase 1: Foundation (1–2 weeks)</div>
+              <div class="bullet">Phase 2: Domain migration (2–3 weeks)</div>
+              <div class="bullet">Phase 3: Cleanup &amp; hardening (1 week)</div>
+              <div>&nbsp;</div>
+              <h3>## Risks &amp; mitigations</h3>
+              <div class="bullet">Breaking changes → feature flags, gradual rollout</div>
+              <div class="bullet">Perf regression → benchmark gates in CI</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="plan-foot">
+          <textarea class="note" rows="2" placeholder="Add a note for the agent (optional)…"></textarea>
+          <div class="plan-actions">
+            <button class="btn accent">✓ Approve</button>
+            <button class="btn ghost">✎ Request changes</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right rail (stays fully visible) -->
+      <aside class="rail rail-right">
+        <div class="rail-body">
+          <div class="card summary-card">
+            <h4>Summary</h4>
+            <div style="font-size:12px;color:rgb(var(--ink-soft));line-height:1.5">
+              Refactor the API layer to improve scalability, maintainability, and developer experience.</div>
+            <div style="margin-top:8px">
+              <div class="kv"><span class="k">Status</span><span class="v" style="color:rgb(var(--live))">● In progress</span></div>
+              <div class="kv"><span class="k">Owner</span><span class="v">Sarah</span></div>
+              <div class="kv"><span class="k">Files</span><span class="v">18</span></div>
+              <div class="kv"><span class="k">Plan</span><span class="v" style="color:rgb(var(--accent))">API refactor plan</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <h4>Skills</h4>
+            <div class="skill"><div class="s-top"><span>Backend engineering</span><span style="color:rgb(var(--ink-mute))">Expert</span></div><div class="bar"><i style="width:82%"></i></div></div>
+            <div class="skill"><div class="s-top"><span>API design</span><span style="color:rgb(var(--ink-mute))">Expert</span></div><div class="bar"><i style="width:76%"></i></div></div>
+            <div class="skill"><div class="s-top"><span>Testing</span><span style="color:rgb(var(--ink-mute))">Advanced</span></div><div class="bar"><i style="width:58%"></i></div></div>
+          </div>
+          <div class="card">
+            <h4>Agents</h4>
+            <div class="agent"><span class="avatar wrap" style="width:26px;height:26px;font-size:11px">C</span>
+              <div><div class="a-name">Code Assistant</div><div class="a-sub">Coding, refactoring</div></div>
+              <span class="dot wrap a-dot"></span></div>
+            <div class="agent"><span class="avatar sdk" style="width:26px;height:26px;font-size:11px">T</span>
+              <div><div class="a-name">Test Analyst</div><div class="a-sub">Test strategy</div></div>
+              <span class="dot mute a-dot"></span></div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <button class="reopen" id="reopenPlan">▤ Open plan</button>
+  <span class="hint">Drag the panel's left edge to resize · click ✕ to collapse · ◐ toggles theme</span>
+
+  <script>
+    const plan = document.getElementById('plan');
+    const resizer = document.getElementById('resizer');
+    const closeBtn = document.getElementById('closePlan');
+    const reopenBtn = document.getElementById('reopenPlan');
+    const themeToggle = document.getElementById('themeToggle');
+
+    closeBtn.addEventListener('click', () => {
+      plan.classList.add('collapsed');
+      document.body.classList.add('plan-closed');
+    });
+    reopenBtn.addEventListener('click', () => {
+      plan.classList.remove('collapsed');
+      document.body.classList.remove('plan-closed');
+    });
+
+    themeToggle.addEventListener('click', () => {
+      const html = document.documentElement;
+      html.dataset.theme = html.dataset.theme === 'light' ? 'dark' : 'light';
+    });
+
+    // Drag-to-resize: handle sits on the LEFT edge, so dragging left widens the
+    // panel and shrinks the chat frame; dragging right does the opposite.
+    let dragging = false;
+    const MIN = 360, MAX = 760;
+    resizer.addEventListener('mousedown', (e) => {
+      dragging = true; resizer.classList.add('dragging');
+      document.body.classList.add('resizing'); e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const right = plan.getBoundingClientRect().right;
+      let w = right - e.clientX;
+      w = Math.max(MIN, Math.min(MAX, w));
+      plan.style.width = w + 'px';
+    });
+    window.addEventListener('mouseup', () => {
+      dragging = false; resizer.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+    });
+  </script>
+</body>
+</html>

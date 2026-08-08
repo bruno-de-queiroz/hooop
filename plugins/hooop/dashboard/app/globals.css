@@ -1,0 +1,496 @@
+/* Syntax highlighting theme for fenced code blocks in assistant
+ * messages. github-dark-dimmed has muted token colors that don't
+ * collide with the semantic cue palette (purple/amber/emerald/blue/rose
+ * are reserved for state per DESIGN.md).
+ *
+ * Imported BEFORE Tailwind so that utility classes on the .hljs
+ * element (bg-neutral-900/80, padding, etc. from the Markdown
+ * component) win at equal specificity. We want the theme's TOKEN
+ * colors but our own SURFACE treatment. */
+@import "highlight.js/styles/github-dark-dimmed.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Theme tokens. tailwind.config maps the `neutral-*` scale onto these RGB
+ * channels, so re-skinning the whole dashboard is just flipping the variables
+ * on <html data-theme> — no class touches anywhere.
+ *
+ * Dark is the reference booth (DESIGN.md): near-black stage, light cards, ink
+ * running bright→faint as the step climbs. Light mirrors the ramp — light page,
+ * dark ink — with raised panels going white on a soft-grey stage. Values are
+ * space-separated RGB triples so `/opacity` modifiers keep working. */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --neutral-50: 255 255 255;
+  --neutral-100: 245 245 245;
+  --neutral-200: 229 229 229;
+  --neutral-300: 212 212 212;
+  --neutral-400: 163 163 163;
+  --neutral-500: 115 115 115;
+  --neutral-600: 82 82 82;
+  --neutral-700: 64 64 64;
+  --neutral-800: 38 38 38;
+  --neutral-900: 23 23 23;
+  --neutral-950: 10 10 10;
+
+  /* --- Desktop-app semantic tokens (dark = reference booth) ---
+   * Additive layer for the migrated shell/primitives. Colors are stored as
+   * space-separated RGB triples so Tailwind's `<alpha-value>` keeps working
+   * (`bg-accent/15`); --sunken/--divider stay rgba (tint/overlay, no alpha
+   * modifier). Un-migrated `neutral-*` panels are unaffected. See DESIGN.md. */
+  --bg: 20 18 16;              /* #141210  desktop backdrop */
+  --window: 32 30 27;          /* #201e1b  floating app window */
+  --rail: 26 24 21;            /* #1a1815  side rails / status bar */
+  --center: 34 31 28;          /* #221f1c  center chat pane */
+  --elevated: 43 40 37;        /* #2b2825  raised control / bubble */
+  --elevated-2: 51 47 43;      /* #332f2b  raised-on-raised (hover) */
+  --sunken: rgba(0, 0, 0, 0.28);        /* inset well (fields, tool cards) */
+  --divider: rgba(255, 255, 255, 0.07); /* hairline borders */
+
+  --ink: 237 232 224;          /* #ede8e0  primary text */
+  --ink-soft: 203 196 185;     /* #cbc4b9  body text */
+  --ink-mute: 148 141 130;     /* #948d82  secondary / labels */
+  --ink-faint: 107 100 91;     /* #6b645b  section titles / chips */
+  --ink-hush: 76 70 62;        /* #4c463e  placeholders / disabled */
+
+  --accent: 226 102 167;       /* #e266a7  rationed brand accent */
+  --accent-press: 199 90 147;  /* #c75a93  accent :active */
+  --live: 245 181 68;          /* #f5b544  amber — running / attention */
+  --wrap: 62 207 142;          /* #3ecf8e  green — wrapper / success */
+  --sdk: 90 162 240;           /* #5aa2f0  blue — SDK / info */
+  --direct: 192 132 252;       /* #c084fc  purple — direct / sub-agent */
+  --fail: 251 113 133;         /* #fb7185  rose — error / failure */
+  --host-bubble: 47 111 82;    /* #2f6f52  host chat bubble */
+  --peer-bubble: 69 137 212;   /* #4589d4  peer chat bubble */
+  /* Text and hairlines drawn ON a host/peer bubble. Dark theme fills those
+     bubbles with a deep green/blue, so everything on top is white. */
+  --bubble-ink: 255 255 255;   /* #ffffff */
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --neutral-50: 10 10 10;
+  --neutral-100: 23 23 23;
+  --neutral-200: 38 38 38;
+  --neutral-300: 64 64 64;
+  --neutral-400: 82 82 82;
+  --neutral-500: 115 115 115;
+  --neutral-600: 163 163 163;
+  --neutral-700: 212 212 212;
+  --neutral-800: 229 229 229;
+  --neutral-900: 255 255 255;
+  --neutral-950: 245 245 245;
+
+  /* --- Desktop-app semantic tokens (light mirrors the ramp) --- */
+  --bg: 233 235 239;           /* #e9ebef */
+  --window: 246 247 249;       /* #f6f7f9 */
+  --rail: 238 240 244;         /* #eef0f4 */
+  --center: 253 253 254;       /* #fdfdfe */
+  --elevated: 233 235 240;     /* #e9ebf0 */
+  --elevated-2: 222 226 232;   /* #dee2e8 */
+  --sunken: rgba(17, 24, 39, 0.05);
+  --divider: rgba(17, 24, 39, 0.09);
+
+  --ink: 20 22 27;             /* #14161b */
+  --ink-soft: 44 49 58;        /* #2c313a */
+  --ink-mute: 84 91 103;       /* #545b67 */
+  --ink-faint: 130 138 150;    /* #828a96 */
+  --ink-hush: 169 175 186;     /* #a9afba */
+
+  --accent: 226 102 167;       /* #e266a7 */
+  --accent-press: 199 90 147;  /* #c75a93 */
+  --live: 180 83 9;            /* #b45309 */
+  --wrap: 23 151 106;          /* #17976a */
+  --sdk: 59 118 207;           /* #3b76cf */
+  --direct: 138 87 207;        /* #8a57cf */
+  --fail: 216 87 107;          /* #d8576b */
+  /* Pale tints of the page rather than blocks of colour dropped onto it. Far
+     too light for white text (which the old #2e7d5a / #3b76cf were already at
+     the limit of, 5.0:1 and 4.5:1 for 13px), so the ink flips dark and lands
+     at 15.4:1 and 14.0:1. That also settles a pre-existing mismatch, since
+     Markdown INSIDE a bubble already paints `**bold**`, headings and inline
+     code with `--ink`, which the old dark fills left at roughly 3.6:1 against
+     their own background.
+
+     The tradeoff is at the other end: these separate from the page by only
+     1.16:1 and 1.27:1, and the green is within 1.01:1 of the assistant's grey
+     bubble — so which bubble is whose is carried almost entirely by hue, with
+     next to no lightness difference to fall back on. */
+  --host-bubble: 200 249 200;  /* #c8f9c8 */
+  --peer-bubble: 200 230 255;  /* #c8e6ff */
+  --bubble-ink: 20 22 27;      /* #14161b — the same --ink that Markdown uses */
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  background: rgb(var(--neutral-950));
+  color: rgb(var(--neutral-200));
+}
+
+/* --- Desktop-shell component classes (ported from the mockup) ---
+ * These use `color-mix()` against the accent, which has no Tailwind utility
+ * equivalent, so they live here as component classes. Used only by the
+ * desktop-shell surfaces — the only shell after the Phase 4 cutover. */
+
+/* --- Mockup component classes, ported verbatim ---
+ * These are the exact control classes the desktop mockup is built on. Ported so
+ * shell markup can mirror the mockup 1:1 for pixel fidelity. The mockup authored
+ * them against hex `var(--x)`; here the color tokens are RGB triples, so every
+ * color use is wrapped `rgb(var(--x))` (— `--sunken`/`--divider` stay rgba and
+ * are used directly). Shell-only: no default-dashboard panel references these. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgb(var(--ink-mute));
+  border-radius: 9px;
+  transition: background 0.15s ease-out, color 0.15s ease-out;
+}
+.icon-btn:hover {
+  color: rgb(var(--ink));
+  background: rgb(var(--elevated));
+}
+.pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgb(var(--elevated));
+  color: rgb(var(--ink-soft));
+  border-radius: 10px;
+  transition: background 0.15s ease-out, color 0.15s ease-out;
+}
+.pill-btn:hover {
+  color: rgb(var(--ink));
+  background: rgb(var(--elevated-2));
+}
+.accent-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  background: rgb(var(--accent));
+  color: #fff;
+  border-radius: 10px;
+  transition: filter 0.15s ease-out, background 0.15s ease-out;
+}
+.accent-btn:hover {
+  filter: brightness(1.07);
+}
+.accent-btn:active {
+  background: rgb(var(--accent-press));
+}
+.accent-btn:disabled {
+  opacity: 0.5;
+}
+.field {
+  background: var(--sunken);
+  border: 1px solid var(--divider);
+  border-radius: 10px;
+  color: rgb(var(--ink));
+  transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out;
+}
+.field::placeholder {
+  color: rgb(var(--ink-hush));
+}
+.field:focus {
+  outline: none;
+  border-color: color-mix(in oklab, rgb(var(--accent)) 60%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, rgb(var(--accent)) 16%, transparent);
+}
+select.field {
+  padding-right: 1.75rem;
+}
+/* Composer mode cue: a leading `>` (chat) tints the field green, a leading `!`
+ * (bash) tints it red — a glanceable signal of what pressing Enter will do,
+ * mirroring the accent focus-ring treatment with the mode's cue color. Two
+ * classes so it beats `.field`'s own border at equal specificity. */
+.field.is-chat {
+  border-color: color-mix(in oklab, rgb(var(--wrap)) 60%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, rgb(var(--wrap)) 16%, transparent);
+}
+.field.is-bash {
+  border-color: color-mix(in oklab, rgb(var(--fail)) 60%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, rgb(var(--fail)) 16%, transparent);
+}
+/* The send button tracks the mode too, so it's unmistakable that this send is a
+ * chat broadcast / bash run rather than a model turn. */
+.accent-btn.is-chat {
+  background: rgb(var(--wrap));
+}
+.accent-btn.is-chat:active {
+  background: color-mix(in oklab, rgb(var(--wrap)) 86%, black);
+}
+.accent-btn.is-bash {
+  background: rgb(var(--fail));
+}
+.accent-btn.is-bash:active {
+  background: color-mix(in oklab, rgb(var(--fail)) 86%, black);
+}
+.list-row {
+  border-radius: 11px;
+  color: rgb(var(--ink-soft));
+  transition: background 0.12s ease-out;
+}
+.list-row:hover {
+  background: rgb(var(--elevated));
+}
+.list-row.is-active {
+  background: color-mix(in oklab, rgb(var(--accent)) 14%, transparent);
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  background: rgb(var(--elevated));
+  color: rgb(var(--ink-faint));
+  border-radius: 6px;
+}
+.tab {
+  color: rgb(var(--ink-faint));
+  border-radius: 8px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: background 0.15s ease-out, color 0.15s ease-out;
+}
+.tab:hover {
+  color: rgb(var(--ink-soft));
+}
+.tab.is-on {
+  color: rgb(var(--accent));
+  background: rgb(var(--elevated));
+}
+.tab.tab-neutral.is-on {
+  color: rgb(var(--ink));
+  background: rgb(var(--elevated));
+}
+.theme-seg {
+  display: inline-flex;
+  gap: 2px;
+  background: var(--sunken);
+  border-radius: 9px;
+  padding: 2px;
+}
+.theme-seg button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgb(var(--ink-faint));
+  border-radius: 7px;
+  transition: background 0.15s ease-out, color 0.15s ease-out;
+}
+.theme-seg button:hover {
+  color: rgb(var(--ink-soft));
+}
+.theme-seg button.is-on {
+  color: rgb(var(--accent));
+  background: rgb(var(--elevated));
+}
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: rgb(var(--elevated));
+  color: rgb(var(--ink-soft));
+  font-weight: 600;
+}
+/* Cue-tinted avatars — the cue MIXED INTO elevated (an opaque warm disc), not a
+   translucent alpha over whatever's behind. Matches the mockup's color-mix. */
+.avatar-accent {
+  background: color-mix(in oklab, rgb(var(--accent)) 16%, rgb(var(--elevated)));
+  color: rgb(var(--accent));
+}
+.avatar-accent-strong {
+  background: color-mix(in oklab, rgb(var(--accent)) 22%, rgb(var(--elevated)));
+  color: rgb(var(--accent));
+}
+.avatar-fail {
+  background: color-mix(in oklab, rgb(var(--fail)) 16%, rgb(var(--elevated)));
+  color: rgb(var(--fail));
+}
+.avatar-wrap {
+  background: color-mix(in oklab, rgb(var(--wrap)) 16%, rgb(var(--elevated)));
+  color: rgb(var(--wrap));
+}
+.avatar-sdk {
+  background: color-mix(in oklab, rgb(var(--sdk)) 30%, rgb(var(--elevated)));
+  color: rgb(var(--sdk));
+}
+.bubble {
+  border-radius: 16px;
+  max-width: min(82%, 40rem);
+}
+/* Code/tool-bearing messages get a fixed wider width — a bit past the 40rem
+   permission popup, never the full chat width. */
+.msg-wide {
+  width: 48rem;
+  max-width: 100%;
+}
+.bubble-assistant {
+  background: rgb(var(--elevated));
+  color: rgb(var(--ink-soft));
+  border-bottom-left-radius: 5px;
+}
+.bubble-host {
+  background: rgb(var(--host-bubble));
+  color: rgb(var(--bubble-ink));
+  border-bottom-right-radius: 5px;
+}
+.bubble-peer {
+  background: rgb(var(--peer-bubble));
+  color: rgb(var(--bubble-ink));
+  border-bottom-right-radius: 5px;
+}
+.tool-card {
+  background: var(--sunken);
+  border: 1px solid var(--divider);
+  border-radius: 12px;
+}
+
+/* Small uppercase rail/section sub-header (mockup's `.section-title`). Ported
+ * as a class so shell markup that mirrors the mockup 1:1 can use it directly;
+ * the `SectionTitle` primitive renders the same treatment for composed UIs. */
+.section-title {
+  font-family: var(--font-archivo), system-ui, -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgb(var(--ink-faint));
+}
+
+/* Summary flair card — the one sanctioned accent-tinted panel (DESIGN.md's
+ * No-Decorative-Tint rule carves this out as functional flair on the rail). */
+.summary-card {
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, rgb(var(--accent)) 8%, rgb(var(--elevated))),
+    rgb(var(--elevated))
+  );
+  border: 1px solid color-mix(in oklab, rgb(var(--accent)) 20%, var(--divider));
+  box-shadow: 0 1px 0 color-mix(in oklab, rgb(var(--accent)) 18%, transparent) inset;
+}
+.summary-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+  color: color-mix(in oklab, rgb(var(--accent)) 62%, rgb(var(--ink-mute)));
+}
+/* Fade hint that content scrolls under the card's bottom edge. */
+.summary-fade {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 1px;
+  height: 22px;
+  border-radius: 0 0 11px 11px;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in oklab, rgb(var(--accent)) 4%, rgb(var(--elevated)))
+  );
+}
+
+/* Fenced code blocks. The block is a SUNKEN well on the surface (matching the
+ * mockup: `background: var(--sunken); border: 1px solid var(--divider)`) rather
+ * than the syntax theme's own slab, so code sits inset on the warm bubble in
+ * both themes instead of clashing as a cool-grey rectangle. The syntax palette
+ * is github-dark-dimmed (imported above) for dark — but its dim base text and
+ * cool `#22272e` slab are overridden below: base ink tracks our warm ink ramp
+ * for contrast, and the slab goes transparent so the well shows through. Light
+ * gets a github-light token palette. */
+.hooop-code {
+  background: var(--sunken);
+  border: 1px solid var(--divider);
+}
+.hooop-code-lang {
+  color: rgb(var(--ink-faint));
+  background: transparent;
+  border-bottom: 1px solid var(--divider);
+}
+
+/* Let the sunken well show through the syntax theme's slab, and raise the
+ * dark base-text contrast (github-dark-dimmed's #adbac7 → our brighter ink). */
+.hljs {
+  background: transparent;
+}
+[data-theme="dark"] .hljs {
+  color: rgb(var(--ink-soft));
+}
+
+[data-theme="light"] .hljs {
+  color: #24292e;
+}
+[data-theme="light"] .hljs-comment,
+[data-theme="light"] .hljs-quote {
+  color: #6a737d;
+}
+[data-theme="light"] .hljs-keyword,
+[data-theme="light"] .hljs-selector-tag,
+[data-theme="light"] .hljs-subst {
+  color: #d73a49;
+}
+[data-theme="light"] .hljs-number,
+[data-theme="light"] .hljs-literal,
+[data-theme="light"] .hljs-variable,
+[data-theme="light"] .hljs-template-variable,
+[data-theme="light"] .hljs-tag .hljs-attr,
+[data-theme="light"] .hljs-built_in,
+[data-theme="light"] .hljs-builtin-name {
+  color: #005cc5;
+}
+[data-theme="light"] .hljs-string,
+[data-theme="light"] .hljs-doctag,
+[data-theme="light"] .hljs-regexp,
+[data-theme="light"] .hljs-link {
+  color: #032f62;
+}
+[data-theme="light"] .hljs-title,
+[data-theme="light"] .hljs-section,
+[data-theme="light"] .hljs-selector-id,
+[data-theme="light"] .hljs-type,
+[data-theme="light"] .hljs-class .hljs-title {
+  color: #6f42c1;
+}
+[data-theme="light"] .hljs-tag,
+[data-theme="light"] .hljs-name,
+[data-theme="light"] .hljs-attribute {
+  color: #22863a;
+}
+[data-theme="light"] .hljs-symbol,
+[data-theme="light"] .hljs-bullet {
+  color: #e36209;
+}
+[data-theme="light"] .hljs-meta {
+  color: #6a737d;
+}
+[data-theme="light"] .hljs-emphasis {
+  font-style: italic;
+}
+[data-theme="light"] .hljs-strong {
+  font-weight: 700;
+}
+
+/* Typing indicator dots: lift + fade. Dots dim to 0.4 at rest and rise to
+ * full while bouncing; stagger the three via animation-delay. Used by the
+ * peer typing bubble (and available to any 3-dot indicator). */
+@keyframes typing-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
+}
