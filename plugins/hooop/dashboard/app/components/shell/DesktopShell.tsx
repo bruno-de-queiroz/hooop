@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, Folder, Globe, NotebookText, RotateCw, X } from "lucide-react";
 import { useSelectedSession } from "@/app/context/SelectedSessionProvider";
 import { AppShell, TitleBar, Rail, CenterPane } from "@/app/components/ui/AppShell";
@@ -28,6 +28,7 @@ import { useOpenBrowserOnRequest } from "./preview/useOpenBrowserOnRequest";
 import { useIsMobile, isMobileNow } from "./useIsMobile";
 import { previewCue } from "./preview/previewCue";
 import { useResizableDock } from "./useResizableDock";
+import { useSqueezeCollapse } from "./useSqueezeCollapse";
 import { ComposerInsertProvider } from "@/app/context/ComposerInsertProvider";
 import { FilesUIProvider, useFilesUI, type RailView } from "@/app/context/FilesUIProvider";
 import { PreviewUIProvider, usePreviewUI } from "@/app/context/PreviewUIProvider";
@@ -169,6 +170,7 @@ function ShellLayout({ isPeer, port }: { isPeer: boolean; port: string }) {
   // without going full fullscreen. Persisted after mount (same SSR-safe pattern
   // as fullscreen); starts expanded.
   const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const centerRef = useRef<HTMLElement | null>(null);
   const [eventsOpen, setEventsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // "Expand the main frame": collapse both rails so the center chat pane goes
@@ -201,9 +203,29 @@ function ShellLayout({ isPeer, port }: { isPeer: boolean; port: string }) {
       /* ignore */
     }
   }, []);
+  // Stable so useSqueezeCollapse's observer isn't torn down every render.
+  const collapseLeftRail = useCallback(() => setLeftCollapsed(true), []);
+  const expandLeftRail = useCallback(() => setLeftCollapsed(false), []);
+  // The chat frame can be squeezed to ~200px with the file dock and right rail
+  // both open, which the session header cannot lay out. Reclaim the left rail's
+  // 224px when that happens — WITHOUT persisting it, so the user's saved
+  // preference survives (setLeftCollapsed directly, not toggleLeftCollapsed).
+  const { onUserToggle: onLeftRailToggled } = useSqueezeCollapse({
+    paneRef: centerRef,
+    collapsed: leftCollapsed,
+    // Fullscreen already collapses everything, and the left rail is
+    // `max-lg:hidden` on mobile — in both cases there is nothing to reclaim.
+    enabled: !isMobile && !fullscreen,
+    onCollapse: collapseLeftRail,
+    onRestore: expandLeftRail,
+  });
+
   const toggleLeftCollapsed = () =>
     setLeftCollapsed((v) => {
       const next = !v;
+      // Tell the squeeze watcher this was a person, not the layout: it must not
+      // reopen a rail closed by hand, nor re-close one just opened by hand.
+      onLeftRailToggled(next);
       try {
         localStorage.setItem("hooop-left-rail-collapsed", next ? "1" : "0");
       } catch {
@@ -211,6 +233,7 @@ function ShellLayout({ isPeer, port }: { isPeer: boolean; port: string }) {
       }
       return next;
     });
+
   const toggleFullscreen = () =>
     setFullscreen((v) => {
       const next = !v;
@@ -287,7 +310,7 @@ function ShellLayout({ isPeer, port }: { isPeer: boolean; port: string }) {
             {isPeer ? <GuestFooter /> : <IdentityFooter onOpenSettings={() => setSettingsOpen(true)} />}
           </Rail>
 
-          <CenterPane>
+          <CenterPane ref={centerRef}>
             <AuthBanner />
             <HookBlockedBanner />
             <ShellCenterPane />

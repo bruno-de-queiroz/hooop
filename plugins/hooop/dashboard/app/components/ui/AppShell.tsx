@@ -149,7 +149,10 @@ function CollapseHandle({
   );
 }
 
-export function CenterPane({ className, children, ...rest }: React.HTMLAttributes<HTMLDivElement>) {
+// `React.ComponentProps<"main">` rather than HTMLAttributes so a caller can pass
+// a `ref` (a plain prop in React 19) and measure the pane — see
+// useSqueezeCollapse, which auto-collapses the left rail when this gets narrow.
+export function CenterPane({ className, children, ...rest }: React.ComponentProps<"main">) {
   return (
     <main className={cn("relative flex-1 min-w-0 flex flex-col bg-center", className)} {...rest}>
       {/* Accent floor-glow behind the transcript (decorative, pointer-none). */}
