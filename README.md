@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/bruno-de-queiroz/hooop/actions/workflows/ci.yml/badge.svg)](https://github.com/bruno-de-queiroz/hooop/actions/workflows/ci.yml)
 
+<img width="1280" height="640" alt="image" src="https://github.com/user-attachments/assets/ef8186db-5c0f-417b-b1eb-941eb55006f3" />
+
 **hooop** runs Claude Code inside a disposable Docker sandbox, with a live web dashboard in front of it. The agent works isolated from your machine, and you get to watch every move.
 
 It gives you two things:
