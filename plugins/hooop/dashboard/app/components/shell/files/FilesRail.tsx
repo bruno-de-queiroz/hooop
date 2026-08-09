@@ -10,7 +10,7 @@ import { useSessionFileTree } from "./useSessionFiles";
 import type { FileNode, GitStatus } from "./types";
 
 // The Files navigator: workspace tree decorated with the session's git status
-// (added / changed / removed / ignored), a filter, an insert-as-@reference
+// (added / changed / removed / ignored), a filter, an insert-as-#reference
 // action, and click-to-preview. Matches the mockup's Files view.
 //
 // Rendered FLAT (one row per visible node, `aria-level` carrying the depth)
@@ -430,11 +430,11 @@ export function FilesRail() {
             type="button"
             tabIndex={isActive ? 0 : -1}
             className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-sdk hover:bg-sdk/[0.18] rounded p-0.5 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-            title="Insert as @reference"
+            title="Insert as #reference"
             aria-label={`Insert ${n.name} as a reference`}
             onClick={(e) => {
               e.stopPropagation();
-              insertReference(`@${n.path}`);
+              insertReference(`#${n.path}`);
             }}
           >
             <Plus className="w-3 h-3" />

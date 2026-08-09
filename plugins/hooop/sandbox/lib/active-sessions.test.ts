@@ -1378,6 +1378,33 @@ describe("/plan turn (plan-mode trigger)", () => {
     expect(meta.promptOverride).toBe("just do the thing");
   });
 
+  it("rewrites #file mentions to claude's @ syntax for the model, keeping # in the transcript", async () => {
+    // "@path" is claude's own sigil: the CLI expands it into an attachment
+    // before the model sees the turn, and ignores "#path" entirely. So the
+    // mention has to be translated on the way to stdin — but ONLY there, or the
+    // "@" leaks back into everyone's transcript.
+    const { writes } = await primeSession("sid-mention");
+    await mod.writeUserTurn("sid-mention", "please read #src/index.ts:42 and #README.md");
+    const text = frames(writes).find((f) => f.type === "user")?.message?.content?.[0]?.text;
+    expect(text).toContain("please read @src/index.ts:42 and @README.md");
+    expect(text).not.toContain("#src/index.ts");
+    expect(mod.popPendingAuthor("sid-mention").promptOverride).toBe(
+      "please read #src/index.ts:42 and #README.md",
+    );
+  });
+
+  it("does not rewrite a '#' inside a pasted code block", async () => {
+    // A pasted shell script's comments are not file references. This is the
+    // regression the "@" sigil never had, so it has to be covered at the seam
+    // and not only in the shared unit test.
+    const { writes } = await primeSession("sid-mention-code");
+    await mod.writeUserTurn("sid-mention-code", "run:\n```bash\n#!/bin/sh\n#setup\n```\nthen #a.ts");
+    const text = frames(writes).find((f) => f.type === "user")?.message?.content?.[0]?.text;
+    expect(text).toContain("#setup");
+    expect(text).not.toContain("@setup");
+    expect(text).toContain("then @a.ts");
+  });
+
   it("does not tag a message that merely starts with a slash but isn't a command", async () => {
     await primeSession("sid-slashy");
     await mod.writeUserTurn("sid-slashy", "/etc/hosts got clobbered, please check");

@@ -90,8 +90,8 @@ describe("useFiles", () => {
       () =>
         expect(result.current).toEqual({
           entries: [
-            { insert: "@a.ts", label: "a.ts", description: null, kind: "file", source: null },
-            { insert: "@src", label: "src", description: "directory", kind: "dir", source: null },
+            { insert: "#a.ts", label: "a.ts", description: null, kind: "file", source: null },
+            { insert: "#src", label: "src", description: "directory", kind: "dir", source: null },
           ],
           loading: false,
         }),
@@ -132,7 +132,7 @@ describe("useFiles", () => {
     await waitFor(
       () =>
         expect(result.current.entries).toEqual([
-          { insert: "@b-result.ts", label: "b-result.ts", description: null, kind: "file", source: null },
+          { insert: "#b-result.ts", label: "b-result.ts", description: null, kind: "file", source: null },
         ]),
       { timeout: 2000 },
     );
@@ -140,7 +140,7 @@ describe("useFiles", () => {
     // Let "a"'s delayed response land — it must not clobber "b"'s result.
     await new Promise((r) => setTimeout(r, 400));
     expect(result.current.entries).toEqual([
-      { insert: "@b-result.ts", label: "b-result.ts", description: null, kind: "file", source: null },
+      { insert: "#b-result.ts", label: "b-result.ts", description: null, kind: "file", source: null },
     ]);
   });
 });

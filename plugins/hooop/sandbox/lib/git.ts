@@ -93,6 +93,12 @@ export interface FilePreview {
   /** Last-modified ms, used by the dock as the raw URL's cache key so an
    * unchanged image is not refetched on an unrelated write. 0 when unknown. */
   mtimeMs: number;
+  /** The path is not on disk at all. Distinct from `content: null`, which a
+   * readable-but-unreadable file also produces: a caller has to tell "there is
+   * no such file" from "this file is empty", because a hand-typed `#mention`
+   * can name anything and the two deserve different UI. NOT set for a git
+   * `removed` file, which is a real tracked path whose content is in the diff. */
+  missing: boolean;
 }
 
 // A slow/huge git call must never wedge the single-threaded server event loop.
@@ -742,6 +748,9 @@ export async function buildFilePreview(cwd: string, relPath: string): Promise<Fi
       imageType: null,
       imageTooLarge: false,
       mtimeMs: 0,
+      // The path is gone from disk, but git knows it: the diff below carries the
+      // old content, so this is a previewable file, not a bad path.
+      missing: false,
     };
   }
 
@@ -755,7 +764,11 @@ export async function buildFilePreview(cwd: string, relPath: string): Promise<Fi
   } catch { /* unreadable/vanished — fall through to the text path */ }
 
   let mtimeMs = 0;
-  try { mtimeMs = (await stat(abs)).mtimeMs; } catch { /* leave 0 */ }
+  // The same stat also answers "is it there at all". A failed read can't:
+  // readCapped throws for a missing file and for an unreadable one alike, and
+  // both would surface as `content: null`.
+  let exists = true;
+  try { mtimeMs = (await stat(abs)).mtimeMs; } catch { exists = false; /* leave mtimeMs 0 */ }
 
   // An over-cap image is reported, not read: there is no useful prefix of a PNG.
   if (image?.tooLarge) {
@@ -763,6 +776,7 @@ export async function buildFilePreview(cwd: string, relPath: string): Promise<Fi
       status, isMarkdown, diff: null, content: null, truncated: false,
       sizeBytes: image.size, binary: true, diffTooLarge: false,
       isImage: true, imageType: image.mediaType, imageTooLarge: true, mtimeMs,
+      missing: false,
     };
   }
 
@@ -811,6 +825,7 @@ export async function buildFilePreview(cwd: string, relPath: string): Promise<Fi
     imageType: image?.mediaType ?? null,
     imageTooLarge: false,
     mtimeMs,
+    missing: !exists,
   };
 }
 

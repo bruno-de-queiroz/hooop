@@ -9,7 +9,7 @@ const LIMIT = 20;
 
 function toEntry(f: FileEntry): AutocompleteEntry {
   return {
-    insert: `@${f.name}`,
+    insert: `#${f.name}`,
     label: f.name,
     description: f.isDir ? "directory" : null,
     kind: f.isDir ? "dir" : "file",
@@ -22,9 +22,9 @@ function keyOf(cwd: string, query: string): string {
 }
 
 /**
- * Debounced `/api/files` lookup for the `@file` autocomplete. `query` is
- * the text after "@" (no leading "@"); pass null to close (no fetch, no
- * entries) — e.g. while the composer's `@` token isn't active.
+ * Debounced `/api/files` lookup for the `#file` autocomplete. `query` is
+ * the text after "#" (no leading "#"); pass null to close (no fetch, no
+ * entries) — e.g. while the composer's `#` token isn't active.
  *
  * Scoped to the selected session's cwd via `useSelectedCwd`, same as
  * `CommandsProvider`, so both autocomplete sources always agree on which

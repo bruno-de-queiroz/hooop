@@ -91,6 +91,11 @@ export interface FilePreviewState {
   data: FilePreviewData | null;
   loading: boolean;
   error: string | null;
+  /** The path isn't on disk. An EXPECTED outcome, not a fault — a clicked
+   *  `#mention` can name anything somebody typed — so the dock gives it its own
+   *  empty state instead of the generic "couldn't load" copy. Kept separate
+   *  from `error` rather than sniffed out of the message string. */
+  notFound: boolean;
 }
 
 /**
@@ -139,7 +144,7 @@ function samePreview(a: FilePreviewData | null, b: FilePreviewData): boolean {
 export function useFilePreview(path: string | null): FilePreviewState {
   const cwd = useSelectedCwd();
   const { filesNonce } = useFilesUI();
-  const [state, setState] = useState<FilePreviewState>({ data: null, loading: false, error: null });
+  const [state, setState] = useState<FilePreviewState>({ data: null, loading: false, error: null, notFound: false });
   // Identity of the file `state` currently describes, so this effect can tell a
   // revalidation from a switch to another file. A ref, not state: it must be
   // readable and writable within one effect run without scheduling a render.
@@ -148,7 +153,7 @@ export function useFilePreview(path: string | null): FilePreviewState {
   useEffect(() => {
     if (!cwd || !path) {
       shownRef.current = null;
-      setState({ data: null, loading: false, error: null });
+      setState({ data: null, loading: false, error: null, notFound: false });
       return;
     }
     const key = `${cwd}\n${path}`;
@@ -158,15 +163,36 @@ export function useFilePreview(path: string | null): FilePreviewState {
     // A revalidation deliberately sets NOTHING here — not even `loading` — so
     // the pane holds still. Two extra renders per fs event would otherwise
     // reconcile every line row of a large file twice for no visible change.
-    if (!revalidating) setState({ data: null, loading: true, error: null });
+    if (!revalidating) setState({ data: null, loading: true, error: null, notFound: false });
     fetch(
       `/api/files/preview?cwd=${encodeURIComponent(cwd)}&path=${encodeURIComponent(path)}`,
       { signal: ctrl.signal },
     )
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`preview ${r.status}`))))
-      .then((data: FilePreviewData) =>
-        setState((prev) => (samePreview(prev.data, data) ? prev : { data, loading: false, error: null })),
-      )
+      .then((data: FilePreviewData) => {
+        // A path that isn't on disk is a FAILURE, not an empty file. Without
+        // this the dock renders a blank pane under the right filename, which
+        // reads as "this file exists and is empty" — and the transcript's
+        // clickable `#mention` chips can name any path a person typed, so a
+        // typo has to say so rather than quietly showing nothing.
+        //
+        // Guarded the same way the catch below is: only when there's nothing on
+        // screen to lose. An atomic-save (write-temp-then-rename) briefly
+        // unlinks the target, so a revalidation landing in that window would
+        // otherwise replace a perfectly good preview with "doesn't exist" and
+        // flip back on the next fs event. A fresh open has already cleared
+        // `data` above, so the error shows there — which is the case that
+        // matters, and the only one where the answer is unambiguous.
+        if (data.missing) {
+          setState((prev) =>
+            prev.data ? prev : { data: null, loading: false, error: null, notFound: true },
+          );
+          return;
+        }
+        setState((prev) =>
+          samePreview(prev.data, data) ? prev : { data, loading: false, error: null, notFound: false },
+        );
+      })
       .catch((e: unknown) => {
         if ((e as { name?: string })?.name === "AbortError") return;
         const message = (e as Error)?.message ?? "failed to load";
@@ -179,7 +205,9 @@ export function useFilePreview(path: string | null): FilePreviewState {
         // is itself a no-op, so a pane that is already reporting this failure
         // doesn't re-render once per write for as long as it keeps failing.
         setState((prev) =>
-          prev.data || prev.error === message ? prev : { data: null, loading: false, error: message },
+          prev.data || prev.error === message
+            ? prev
+            : { data: null, loading: false, error: message, notFound: false },
         );
       });
     return () => ctrl.abort();

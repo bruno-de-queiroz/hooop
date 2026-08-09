@@ -240,3 +240,40 @@ describe("Markdown", () => {
     expect(container.querySelector("br")).toBeInTheDocument();
   });
 });
+
+describe("Markdown — #file mention chips", () => {
+  it("chips a mention and leaves an issue reference alone", () => {
+    const { container } = render(<Markdown source="see #src/a.ts about #123" fileChips />);
+    const chips = [...container.querySelectorAll("span,button")].filter(
+      (e) => e.textContent === "#src/a.ts",
+    );
+    expect(chips).toHaveLength(1);
+    expect(container.textContent).toContain("#123");
+  });
+
+  it("renders chips as inert spans when no handler is given", () => {
+    const { container } = render(<Markdown source="see #src/a.ts" fileChips />);
+    expect(container.querySelector("button")).toBeNull();
+  });
+
+  it("renders a clickable button and reports the parsed path and line", async () => {
+    const seen: Array<{ path: string; line: number | null }> = [];
+    render(<Markdown source="see #src/a.ts:42" fileChips onFileMention={(m) => seen.push(m)} />);
+    const btn = screen.getByRole("button", { name: "#src/a.ts:42" });
+    btn.click();
+    expect(seen).toEqual([{ path: "src/a.ts", line: 42 }]);
+  });
+
+  it("reports a null line for a mention without a suffix", () => {
+    const seen: Array<{ path: string; line: number | null }> = [];
+    render(<Markdown source="see #README.md" fileChips onFileMention={(m) => seen.push(m)} />);
+    screen.getByRole("button", { name: "#README.md" }).click();
+    expect(seen).toEqual([{ path: "README.md", line: null }]);
+  });
+
+  it("does not chip inside a fenced code block", () => {
+    const source = "```sh\n#setup\n```";
+    render(<Markdown source={source} fileChips onFileMention={() => {}} />);
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+});

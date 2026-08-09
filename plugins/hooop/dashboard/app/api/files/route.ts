@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Listing endpoint backing the @file autocomplete in the composer. Scoped
+ * Listing endpoint backing the #file autocomplete in the composer. Scoped
  * to the session's cwd (passed as a query param so the route is
  * stateless). The sandbox applies the same cwd policy used when
  * spawning a session, so an off-policy or non-existent path 400s.

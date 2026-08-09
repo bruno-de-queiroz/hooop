@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useActiveSession } from "@/app/context/ActiveSessionProvider";
 import { useSelectedSession } from "@/app/context/SelectedSessionProvider";
+import { useFilesUI } from "@/app/context/FilesUIProvider";
 import { useSessions } from "@/app/context/SessionsProvider";
 import { usePresence } from "@/app/context/hooks/usePresence";
 import { Button } from "../ui";
@@ -49,6 +50,26 @@ export function ShellCenterPane() {
     .join(", ");
   // Stable so the memoized transcript isn't re-rendered by every presence beat.
   const onLoadMore = useCallback(() => void active.loadMore(), [active]);
+
+  // Clicking a `#file` chip in the transcript opens the navigator AND the
+  // preview — the same three moves the "files to review" pill makes, and
+  // deliberately NOT openMobile: like that pill, a chip has no browsed list
+  // behind it, so forcing the full-screen tree open would leave it dangling
+  // under the dock (see ShellFilesReviewPill's note).
+  //
+  // All three actions are stable (raw setters / useCallback in FilesUIProvider)
+  // and selectedId only changes on a session switch, so this callback keeps its
+  // identity and never defeats ShellTranscript's memo.
+  const { setView, setRailCollapsed, openFile } = useFilesUI();
+  const onOpenMention = useCallback(
+    ({ path }: { path: string; line: number | null }) => {
+      if (!selectedId) return;
+      setView("files");
+      setRailCollapsed(false);
+      openFile({ sessionId: selectedId, path, name: path.split("/").pop() || path });
+    },
+    [selectedId, setView, setRailCollapsed, openFile],
+  );
 
   // Peer "Leave session": relinquish access. The route emits the leave marker,
   // drops presence, and clears the peer cookie — so returning needs a fresh
@@ -158,6 +179,7 @@ export function ShellCenterPane() {
         viewerKind={viewerKind}
         viewerName={viewerName}
         typingLabel={typingLabel}
+        onOpenMention={onOpenMention}
       />
       <ShellPlanReviewCard />
       <ShellPermissions />

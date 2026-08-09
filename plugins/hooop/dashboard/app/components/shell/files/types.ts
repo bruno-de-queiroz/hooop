@@ -56,4 +56,8 @@ export interface FilePreviewData {
   imageTooLarge?: boolean;
   /** Cache key for the raw URL, so an unrelated write doesn't refetch the image. */
   mtimeMs?: number;
+  /** The path is not on disk. Distinct from an empty file (`content: ""`), which
+   * this payload would otherwise be indistinguishable from — see useFilePreview,
+   * which turns this into an error rather than rendering a blank pane. */
+  missing?: boolean;
 }

@@ -127,7 +127,7 @@ export function canAnswerQuestions(): boolean {
   return cap === "full" || cap === "drive";
 }
 
-/** May this viewer add @file references (from the Files navigator, the preview
+/** May this viewer add #file references (from the Files navigator, the preview
  * header, or a line click)? A reference is an input action — it's folded into
  * the outgoing message — so a peer needs turn capability (full or drive); a
  * spectate share is view-only and must not add references anywhere. Host always

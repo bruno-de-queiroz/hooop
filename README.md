@@ -125,12 +125,12 @@ The dashboard has these panels:
 - **Sessions**: watches `~/.claude/sessions/` and updates in real time.
 - **Skills**: every skill on disk (user + plugin), filterable, with a one-click "Run" that starts a real session using the skill's invocation as its first turn. It behaves like any other session (same transcript, `/stop`, permission gate, pairing), just badged with the skill that triggered it.
 - **Sub-agents**: a tree rebuilt from PreToolUse/PostToolUse events on the `Agent` tool. Click a node to see its prompt, tool calls, and final output.
-- **Files**: a docked diff viewer for files the agent has touched, unified diffs with hunk navigation, markdown preview, and click-to-insert `@path:line` references into the composer. A small "N files affected, Review" pill shows up above the composer when there's something to look at.
+- **Files**: a docked diff viewer for files the agent has touched, unified diffs with hunk navigation, markdown preview, and click-to-insert `#path:line` references into the composer. A small "N files affected, Review" pill shows up above the composer when there's something to look at.
 - **Events**: a live tail over Server-Sent Events. Hooks push each event to the sandbox's `/ingest` endpoint over a Unix domain socket. No polling.
 - **Preview**: a docked panel showing a running app in an iframe, its spec, per-step logs, and Restart / Rebuild / Stop / Share. Shows up on its own when the agent brings a preview up. See [Live previews](#live-previews).
 - **Search**: opens with ⌘K. Keyword search (BM25/FTS5) always works. Semantic search (sqlite-vec) turns on once you configure an embedding backend via `hooop setup`. Docker Model Runner is the easy default; Ollama, OpenAI, or any OpenAI-compatible endpoint are alternatives. Hybrid mode blends both.
 
-The composer itself packs a few extra behaviors. `/stop` aborts the running turn, `/model <alias>` switches the session's model, and `/auto-mode [on|off]` toggles unattended approval for routine tools, git and anything destructive always still stops for a human. You can attach images (paste or file picker) and pull files into the message with `@name` autocomplete.
+The composer itself packs a few extra behaviors. `/stop` aborts the running turn, `/model <alias>` switches the session's model, and `/auto-mode [on|off]` toggles unattended approval for routine tools, git and anything destructive always still stops for a human. You can attach images (paste or file picker) and pull files into the message with `#name` autocomplete. The sandbox translates those to claude's own `@` syntax on the way to the model, so `@` stays free for people.
 
 When the agent asks a clarifying question (`AskUserQuestion`), it shows up as an inline card with the choices as buttons, plus a free-text "Other" option, right above the composer. Peers who are just spectating see it read-only.
 

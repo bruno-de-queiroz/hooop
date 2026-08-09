@@ -1,7 +1,8 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, AtSign, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Eye, FileText, Maximize2, X, ZoomIn, ZoomOut } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Eye, FileText, FileX2, Hash, Maximize2, X, ZoomIn, ZoomOut } from "lucide-react";
 import { cn } from "../../ui/cn";
+import { button } from "../../ui/Button";
 import { Markdown } from "../../Markdown";
 import { useFilesUI } from "@/app/context/FilesUIProvider";
 import { useSelectedCwd } from "@/app/context/useSelectedCwd";
@@ -16,7 +17,7 @@ import type { DiffHunk } from "./types";
 // useResizableDock) so it sits in the same slot between the chat frame and the
 // right rail. Renders a full-file unified diff (with change-block navigation)
 // for changed files, a rendered/raw toggle for markdown, and plain numbered
-// lines otherwise. Any line click inserts an `@path:line` reference into the
+// lines otherwise. Any line click inserts a `#path:line` reference into the
 // composer. Syntax highlighting for both diff and plain views lives in
 // ./highlight (highlight.js, matching the Markdown code block).
 
@@ -34,7 +35,7 @@ export function ShellFilesDock() {
   const { file, closeFile, openFile } = useFilesUI();
   const cwd = useSelectedCwd();
   const { insertReference, canInsert } = useComposerInsert();
-  const { data: preview, loading, error } = useFilePreview(file?.path ?? null);
+  const { data: preview, loading, error, notFound } = useFilePreview(file?.path ?? null);
   const { prev, next } = useAdjacentFiles(file?.path ?? null);
 
   const { width, dragging, asideRef, onPointerDown } = useResizableDock("hooop-file-preview-dock-width");
@@ -58,7 +59,7 @@ export function ShellFilesDock() {
   // changed SVG is its diff, so the toggle is how you review one.
   useEffect(() => setSvgRendered(true), [file?.path]);
 
-  const insertLine = useCallback((line: number) => insertReference(`@${file?.path}:${line}`), [file?.path, insertReference]);
+  const insertLine = useCallback((line: number) => insertReference(`#${file?.path}:${line}`), [file?.path, insertReference]);
 
   const goToAdjacent = useCallback(
     (target: { path: string; name: string } | null) => {
@@ -165,10 +166,10 @@ export function ShellFilesDock() {
         {canInsert && (
           <button
             className="icon-btn w-8 h-8 text-sdk hover:bg-sdk/[0.16]"
-            title="Insert as @reference"
-            onClick={() => insertReference(`@${file.path}`)}
+            title="Insert as #reference"
+            onClick={() => insertReference(`#${file.path}`)}
           >
-            <AtSign className="w-4 h-4" />
+            <Hash className="w-4 h-4" />
           </button>
         )}
         <button className="icon-btn w-8 h-8" title="Close" onClick={closeFile}>
@@ -178,10 +179,19 @@ export function ShellFilesDock() {
 
       {loading && !preview ? (
         <div className="flex-1 grid place-items-center text-[12px] text-ink-faint">Loading…</div>
-      ) : error ? (
-        <div className="flex-1 grid place-items-center px-6 text-center text-[12px] text-fail">
-          Couldn&apos;t load this file: {error}
-        </div>
+      ) : notFound || error ? (
+        <DockEmptyState
+          tone={notFound ? "fail" : "live"}
+          icon={notFound ? <FileX2 className="w-4 h-4" /> : <AlertTriangle className="w-4 h-4" />}
+          title={notFound ? "File not found" : "Couldn't load this file"}
+          path={file.path}
+          detail={
+            notFound
+              ? "It isn't in this session's workspace. A reference can point at a path that was deleted, moved, or never existed."
+              : error
+          }
+          onClose={closeFile}
+        />
       ) : preview?.imageTooLarge ? (
         <div className="flex-1 grid place-items-center px-6 text-center text-[12px] text-ink-faint">
           Image is {formatBytes(preview.sizeBytes ?? 0)} — too large to preview.
@@ -479,11 +489,11 @@ function DiffBody({
                 l.sign === "+" && "bg-wrap/[0.09]",
                 l.sign === "-" && "bg-fail/[0.09]",
               )}
-              title={clickable && line != null ? `Insert @…:${line}` : undefined}
+              title={clickable && line != null ? `Insert #…:${line}` : undefined}
             >
               {clickable && (
                 <span className="pointer-events-none absolute left-0.5 inset-y-0 flex items-center text-sdk font-bold text-[11px] opacity-0 group-hover:opacity-100 select-none">
-                  @
+                  #
                 </span>
               )}
               <span className="w-9 shrink-0 px-1 text-right text-ink-hush select-none tabular-nums">{l.oldNo ?? ""}</span>
@@ -514,6 +524,50 @@ function DiffBody({
 }
 
 // ── Plain numbered view ──────────────────────────────────────────────────────
+// Dock empty state for the two ways a preview can have nothing to show. Follows
+// the app's established empty-state language — icon badge, title, subtitle, one
+// action — the same shape as not-found.tsx and ShellNewSession, rather than a
+// bare line of red text. The path is echoed in mono because the whole point of
+// the not-found case is WHICH path failed, and a clicked `#mention` may name one
+// the reader never typed.
+function DockEmptyState({
+  tone,
+  icon,
+  title,
+  path,
+  detail,
+  onClose,
+}: {
+  tone: "fail" | "live";
+  icon: React.ReactNode;
+  title: string;
+  path: string;
+  detail: string | null;
+  onClose: () => void;
+}) {
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto grid place-items-center p-8">
+      <div className="flex flex-col items-center text-center max-w-xs">
+        <span
+          className="avatar w-9 h-9 shrink-0 mb-4"
+          style={{
+            background: `color-mix(in oklab, rgb(var(--${tone})) 16%, rgb(var(--elevated)))`,
+            color: `rgb(var(--${tone}))`,
+          }}
+        >
+          {icon}
+        </span>
+        <h2 className="text-[14px] font-semibold text-ink mb-1">{title}</h2>
+        <p className="font-mono text-[11px] text-ink-mute break-all mb-2">{path}</p>
+        {detail && <p className="text-[12px] text-ink-faint mb-5">{detail}</p>}
+        <button type="button" onClick={onClose} className={button({ variant: "ghost", size: "sm" })}>
+          Close preview
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PlainBody({ text, lang, onLine }: { text: string; lang: string | null; onLine?: (line: number) => void }) {
   // Highlight the whole file once, then render one HTML fragment per line so
   // gutter numbers + click-to-reference still work. `hljs` sets the themed base
@@ -530,11 +584,11 @@ function PlainBody({ text, lang, onLine }: { text: string; lang: string | null; 
             "group relative flex items-stretch",
             clickable && "cursor-pointer hover:bg-sdk/[0.12]",
           )}
-          title={clickable ? `Insert @…:${i + 1}` : undefined}
+          title={clickable ? `Insert #…:${i + 1}` : undefined}
         >
           {clickable && (
             <span className="pointer-events-none absolute left-0.5 inset-y-0 flex items-center text-sdk font-bold text-[11px] opacity-0 group-hover:opacity-100 select-none">
-              @
+              #
             </span>
           )}
           <span className="w-10 shrink-0 px-2 text-right text-ink-hush select-none tabular-nums border-r border-divider">{i + 1}</span>

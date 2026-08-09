@@ -6,18 +6,18 @@ import { canDecidePermissions, useMounted } from "../lib/participant";
 
 export interface ComposerTrigger {
   type: "slash" | "file";
-  /** Index into the text where the trigger character ("/" or "@") sits. */
+  /** Index into the text where the trigger character ("/" or "#") sits. */
   start: number;
   /** Text typed after the trigger character, up to the caret. */
   query: string;
 }
 
 /**
- * Resolves the active `/` or `@` trigger (if any) given the composer's
+ * Resolves the active `/` or `#` trigger (if any) given the composer's
  * text and caret offset. `/` only fires when it's the very first
  * character and no space has been typed yet — a slash command is the
  * whole message, mirroring how `!bash` / `>chat` mode-detection already
- * works. `@` fires at the start of the current whitespace-delimited
+ * works. `#` fires at the start of the current whitespace-delimited
  * word, anywhere in the text — an inline file mention.
  */
 export function detectTrigger(text: string, cursor: number): ComposerTrigger | null {
@@ -26,10 +26,10 @@ export function detectTrigger(text: string, cursor: number): ComposerTrigger | n
   const slash = /^\/(\S*)$/.exec(before);
   if (slash) return { type: "slash", start: 0, query: slash[1] };
 
-  const at = /(?:^|\s)@(\S*)$/.exec(before);
-  if (at) {
-    const start = before[at.index] === "@" ? at.index : at.index + 1;
-    return { type: "file", start, query: at[1] };
+  const hash = /(?:^|\s)#(\S*)$/.exec(before);
+  if (hash) {
+    const start = before[hash.index] === "#" ? hash.index : hash.index + 1;
+    return { type: "file", start, query: hash[1] };
   }
 
   return null;
@@ -50,8 +50,8 @@ export function spliceTrigger(
 }
 
 /** Removes the trigger token (from `trigger.start` through the caret) entirely,
- * collapsing a double space at the seam. Used when a `@file` selection becomes
- * a chip instead of inline text, so no partial `@query` is left behind. Pure. */
+ * collapsing a double space at the seam. Used when a `#file` selection becomes
+ * a chip instead of inline text, so no partial `#query` is left behind. Pure. */
 export function removeTriggerToken(
   text: string,
   cursor: number,
@@ -63,7 +63,7 @@ export function removeTriggerToken(
   return { text: before + after, cursor: before.length };
 }
 
-// A resolved autocomplete pick: `/command` splices inline ("text"); `@file`
+// A resolved autocomplete pick: `/command` splices inline ("text"); `#file`
 // becomes a removable chip ("ref", with the partial token stripped from text).
 export type AutocompleteSelectResult =
   | { kind: "text"; text: string; cursor: number }
@@ -87,8 +87,8 @@ export interface UseComposerAutocompleteResult {
   onKeyDown: (e: { key: string; shiftKey?: boolean }) => ComposerAutocompleteAction;
   /**
    * Resolves the active (or given) entry at the trigger position. A `/command`
-   * returns an inline `"text"` splice; a `@file` returns a `"ref"` (the mention
-   * for a chip, with the partial `@query` stripped from the text). Null if
+   * returns an inline `"text"` splice; a `#file` returns a `"ref"` (the mention
+   * for a chip, with the partial `#query` stripped from the text). Null if
    * there's no active trigger or no entry to insert.
    */
   select: (text: string, cursor: number, entry?: AutocompleteEntry) => AutocompleteSelectResult | null;
@@ -172,7 +172,7 @@ export function useComposerAutocomplete(): UseComposerAutocompleteResult {
     const chosen = entry ?? entries[clampedActiveIndex];
     if (!chosen) return null;
     if (trigger.type === "file") {
-      // A file mention becomes a chip: strip the partial `@query` from the text
+      // A file mention becomes a chip: strip the partial `#query` from the text
       // and hand the mention back for the composer to add as a reference chip.
       const stripped = removeTriggerToken(text, cursor, trigger);
       close();

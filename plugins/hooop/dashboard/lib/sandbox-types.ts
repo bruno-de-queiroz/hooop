@@ -240,6 +240,11 @@ export interface FilePreviewResponse {
   imageTooLarge: boolean;
   /** Cache key for the raw URL. */
   mtimeMs: number;
+  /** The path is not on disk — distinct from an empty file, which also arrives
+   * with no content. Optional so a dashboard talking to an older sandbox (which
+   * never sends it) simply falls back to the previous blank-pane behaviour
+   * rather than reporting every file as missing. */
+  missing?: boolean;
 }
 
 /** Whole-image bytes, base64 over the sandbox socket (its client decodes bodies

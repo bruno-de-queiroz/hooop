@@ -173,6 +173,52 @@ describe("useFilePreview — live refresh must not disturb the reader", () => {
     expect(seen.at(-1)?.error).toBe("preview 500");
   });
 
+  it("reports a path that isn't on disk as notFound, not an empty file", async () => {
+    // The transcript's clickable `#mention` chips can name any path somebody
+    // typed, so a bad one has to say so — a blank pane under the right filename
+    // reads as "this file exists and is empty".
+    responses = [preview({ missing: true, content: null })];
+    render(<Probe path="nope/missing.ts" />);
+    await settle();
+    expect(seen.at(-1)?.data).toBeNull();
+    expect(seen.at(-1)?.notFound).toBe(true);
+    // Its own state, NOT a generic load failure — the dock renders a different
+    // empty state for each, so conflating them would lose that distinction.
+    expect(seen.at(-1)?.error).toBeNull();
+  });
+
+  it("keeps a real load failure distinct from notFound", async () => {
+    responses = [FAIL];
+    render(<Probe path="a.ts" />);
+    await settle();
+    expect(seen.at(-1)?.error).toBe("preview 500");
+    expect(seen.at(-1)?.notFound).toBe(false);
+  });
+
+  it("does NOT treat a genuinely empty file as missing", async () => {
+    responses = [preview({ content: "", sizeBytes: 0 })];
+    render(<Probe path="empty.txt" />);
+    await settle();
+    expect(seen.at(-1)?.error).toBeNull();
+    expect(seen.at(-1)?.notFound).toBe(false);
+    expect(seen.at(-1)?.data?.content).toBe("");
+  });
+
+  it("keeps the stale preview when a revalidation reports missing", async () => {
+    // An atomic save (write-temp-then-rename) briefly unlinks the target. A
+    // refetch landing in that window must not replace a good preview with
+    // "doesn't exist" and flip back on the next fs event — same rule as a
+    // failed revalidation above.
+    responses = [preview(), preview({ missing: true, content: null })];
+    const { rerender } = render(<Probe path="a.ts" />);
+    await settle();
+
+    await fsChange(() => rerender(<Probe path="a.ts" />));
+
+    expect(seen.at(-1)?.data?.content).toBe("line one\nline two\n");
+    expect(seen.at(-1)?.error).toBeNull();
+  });
+
   it("DOES blank the pane when a different file is opened", async () => {
     responses = [preview(), preview({ content: "other file\n" })];
     const { rerender } = render(<Probe path="a.ts" />);

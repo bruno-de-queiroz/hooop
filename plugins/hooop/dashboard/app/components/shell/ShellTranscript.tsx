@@ -11,7 +11,7 @@ import {
   bashShortcutData,
   systemText,
 } from "../active-session/eventText";
-import { Markdown } from "../Markdown";
+import { Markdown, type MentionClickHandler } from "../Markdown";
 import { cn } from "../ui/cn";
 import { prettyToolName } from "../lib/format";
 import { isHiddenTurnKind } from "@shared/turn-kinds";
@@ -199,6 +199,7 @@ const HostBubble = memo(function HostBubble({
   mine,
   chat = false,
   onOpenImage,
+  onOpenMention,
 }: {
   row: EventRow;
   // `mine` drives color only: my own turns are green (host bubble), everyone
@@ -212,6 +213,9 @@ const HostBubble = memo(function HostBubble({
   // Stable identity from the parent so memo isn't defeated. Omitted → thumbnails
   // are non-interactive (standalone renders / tests).
   onOpenImage?: (key: string) => void;
+  // Open a clicked `#file` chip in the navigator + preview. Same stability rule
+  // as onOpenImage; omitted → chips render as inert labels.
+  onOpenMention?: MentionClickHandler;
 }) {
   const text = userPromptText(row);
   const images = Array.isArray(row.images) ? row.images : [];
@@ -249,7 +253,7 @@ const HostBubble = memo(function HostBubble({
       >
         {text && (
           <div className="break-words">
-            <Markdown source={text} fileChips />
+            <Markdown source={text} fileChips onFileMention={onOpenMention} />
           </div>
         )}
         {images.length > 0 && (
@@ -902,6 +906,7 @@ export const ShellTranscript = memo(function ShellTranscript({
   viewerKind = "host",
   viewerName = "Host",
   typingLabel = "",
+  onOpenMention,
 }: {
   events: EventRow[];
   hasMore: boolean;
@@ -915,6 +920,10 @@ export const ShellTranscript = memo(function ShellTranscript({
   // Comma-joined display names of OTHER participants currently composing (self
   // already excluded upstream). Empty → no typing bubble.
   typingLabel?: string;
+  // Open a clicked `#file` chip in the files navigator + preview. Must be
+  // stable (see openImage) or every bubble re-renders. Omitted → chips are
+  // inert, which is what standalone renders and tests get.
+  onOpenMention?: MentionClickHandler;
 }) {
   const viewer: Viewer = { kind: viewerKind, name: viewerName };
 
@@ -1132,7 +1141,7 @@ export const ShellTranscript = memo(function ShellTranscript({
         } else if (e.kind === "command") {
           pushNode(`u-${e.id}`, <CommandCard row={e} />);
         } else {
-          pushNode(`u-${e.id}`, <HostBubble row={e} mine={isMine(e, viewer)} onOpenImage={openImage} />);
+          pushNode(`u-${e.id}`, <HostBubble row={e} mine={isMine(e, viewer)} onOpenImage={openImage} onOpenMention={onOpenMention} />);
         }
         break;
       case "Stop":
@@ -1183,7 +1192,7 @@ export const ShellTranscript = memo(function ShellTranscript({
         break;
       }
       case "Chat":
-        pushNode(`c-${e.id}`, <HostBubble row={e} mine={isMine(e, viewer)} chat onOpenImage={openImage} />);
+        pushNode(`c-${e.id}`, <HostBubble row={e} mine={isMine(e, viewer)} chat onOpenImage={openImage} onOpenMention={onOpenMention} />);
         break;
       case "PermissionRequest":
       case "PermissionResponse":

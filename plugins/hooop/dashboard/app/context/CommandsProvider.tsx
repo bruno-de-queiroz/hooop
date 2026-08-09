@@ -5,7 +5,7 @@ import { useSelectedCwd } from "./useSelectedCwd";
 import { useSSE } from "@/app/components/useSSE";
 
 export interface AutocompleteEntry {
-  /** Visible insertion text, including leading "/" or "@". e.g. "/hooop:setup", "@src/index.ts". */
+  /** Visible insertion text, including leading "/" or "#". e.g. "/hooop:setup", "#src/index.ts". */
   insert: string;
   /** Short label for the popover; usually identical to insert minus the prefix. */
   label: string;

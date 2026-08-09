@@ -42,6 +42,7 @@ import {
   summarizePreviews,
 } from "./previews";
 import { validatePreviewSpec, PREVIEW_LIMITS, type PreviewSpec } from "@shared/preview-spec";
+import { toClaudeFileRefs } from "@shared/file-mentions";
 import { driveQueue, describeDriveResult } from "./preview-drive";
 // Both are leaf modules (neither imports this one), so the idle sweeps can reuse
 // the same revocation the delete-session path uses without an import cycle.
@@ -1543,9 +1544,16 @@ export async function writeUserTurn(
   const sender = isPeerTurn
     ? `"${author}", a peer collaborating in this shared session (not the host)`
     : "the host (this session's operator)";
+  // File references are the second thing modelText and the transcript disagree
+  // about. hooop's sigil is "#", but "@" is claude's own — the CLI expands an
+  // "@path" into an attachment before the model sees the turn, even on this
+  // stream-json stdin path, and ignores "#path" entirely. So the mention is
+  // rewritten HERE and only here: the transcript (promptOverride) keeps the "#"
+  // the user typed, and nobody's UI ever shows the "@". A native passthrough
+  // command is dispatched verbatim and never carries mentions.
   const modelText = isNativePassthrough
     ? turnText.trim()
-    : `[Session context: the following message is from ${sender}.]\n\n` + turnText;
+    : `[Session context: the following message is from ${sender}.]\n\n` + toClaudeFileRefs(turnText);
   if (promptOverride == null) promptOverride = text.trim();
 
   // Per-turn plan tracking. In plan mode the gate holds the session read-only

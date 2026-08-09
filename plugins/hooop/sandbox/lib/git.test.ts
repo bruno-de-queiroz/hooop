@@ -388,6 +388,36 @@ describe("git.ts — buildFilePreview image classification", () => {
     expect(p.mtimeMs).toBe(0);
   });
 
+  it("flags a path that is not on disk as missing, not as an empty file", async () => {
+    // The click-to-open path in the transcript can name anything the user typed
+    // in a `#mention`, so "no such file" has to be distinguishable from "this
+    // file is empty" — both otherwise arrive as content: null.
+    const p = await buildFilePreview(dir, "nope/missing.ts");
+    expect(p.missing).toBe(true);
+    expect(p.content).toBeNull();
+  });
+
+  it("does not flag a genuinely empty file as missing", async () => {
+    writeFileSync(join(dir, "empty.txt"), "");
+    const p = await buildFilePreview(dir, "empty.txt");
+    expect(p.missing).toBe(false);
+    expect(p.content).toBe("");
+  });
+
+  it("does not flag a git-removed file as missing (its content is in the diff)", async () => {
+    await execFileAsync("git", ["init", "-q"], { cwd: dir });
+    await execFileAsync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    await execFileAsync("git", ["config", "user.name", "t"], { cwd: dir });
+    writeFileSync(join(dir, "tracked.txt"), "hello\n");
+    await execFileAsync("git", ["add", "-A"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-qm", "add"], { cwd: dir });
+    rmSync(join(dir, "tracked.txt"));
+
+    const p = await buildFilePreview(dir, "tracked.txt");
+    expect(p.status).toBe("removed");
+    expect(p.missing).toBe(false);
+  });
+
   it("still classifies a CHANGED image (the tree carries the badge, not the preview)", async () => {
     await execFileAsync("git", ["init", "-q"], { cwd: dir });
     await execFileAsync("git", ["config", "user.email", "t@t"], { cwd: dir });

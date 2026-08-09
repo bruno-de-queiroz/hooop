@@ -1,6 +1,6 @@
 "use client";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowUp, AtSign, Eye, Image as ImageIcon, MessageCircle, Terminal, X } from "lucide-react";
+import { AlertTriangle, ArrowUp, Eye, Hash, Image as ImageIcon, MessageCircle, Terminal, X } from "lucide-react";
 import { useActiveSession } from "@/app/context/ActiveSessionProvider";
 import { userPromptText, extractEventField } from "../active-session/eventText";
 import { isPeerClient, peerCapability, myDisplayName, useMounted } from "../lib/participant";
@@ -23,7 +23,7 @@ import { AutocompletePopover } from "./AutocompletePopover";
 // text → send, `!cmd` → runBash, `>msg` → participant chat, and image
 // attachments (button or paste) that ride along on send/chat. Typing broadcasts
 // via presence. A spectate peer gets the read-only note. `/` (start of message)
-// and `@` (anywhere) open the autocomplete popover via useComposerAutocomplete.
+// and `#` (anywhere) open the autocomplete popover via useComposerAutocomplete.
 
 // Where a composed line goes. Plain text → the model (`send`); `!cmd` → bash;
 // `>msg` → participant chat; and the client-intercepted control commands,
@@ -99,7 +99,9 @@ export const ShellComposer = memo(function ShellComposer({
   // File references added from the Files navigator, shown as removable chips
   // (like image attachments) rather than spliced into the text — they're folded
   // back into the outgoing message on send. Each entry is a full mention, e.g.
-  // "@src/app.py" or "@src/app.py:42".
+  // "#src/app.py" or "#src/app.py:42". The sandbox rewrites these to claude's
+  // own "@" syntax for the model only (see toClaudeFileRefs); the transcript
+  // keeps the "#".
   const [refs, setRefs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -164,13 +166,13 @@ export const ShellComposer = memo(function ShellComposer({
     }
   }
 
-  // Add a `@mention` as a deduped reference chip.
+  // Add a `#mention` as a deduped reference chip.
   function addRef(mention: string) {
-    const m = mention.startsWith("@") ? mention : `@${mention}`;
+    const m = mention.startsWith("#") ? mention : `#${mention}`;
     setRefs((cur) => (cur.includes(m) ? cur : [...cur, m]));
   }
 
-  // Apply an autocomplete pick: a `/command` splices inline, a `@file` becomes a
+  // Apply an autocomplete pick: a `/command` splices inline, a `#file` becomes a
   // chip (the partial token was already stripped from `result.text`).
   function applySelect(result: ReturnType<typeof autocomplete.select>) {
     if (!result) return;
@@ -281,7 +283,7 @@ export const ShellComposer = memo(function ShellComposer({
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     // The autocomplete popover gets first crack at every key while a `/` or
-    // `@` trigger is active — otherwise ArrowUp/ArrowDown would fall through
+    // `#` trigger is active — otherwise ArrowUp/ArrowDown would fall through
     // to prompt-history recall below, and Enter would submit instead of
     // inserting the highlighted entry.
     const action = autocomplete.onKeyDown(e);
@@ -402,8 +404,8 @@ export const ShellComposer = memo(function ShellComposer({
                 key={r}
                 className="inline-flex items-center gap-1 rounded-md pl-1.5 pr-1 py-1 text-[11px] font-mono bg-sdk/[0.15] text-sdk border border-sdk/30 max-w-full"
               >
-                <AtSign className="w-3 h-3 shrink-0" />
-                <span className="truncate">{r.replace(/^@/, "")}</span>
+                <Hash className="w-3 h-3 shrink-0" />
+                <span className="truncate">{r.replace(/^#/, "")}</span>
                 <button
                   type="button"
                   onClick={() => setRefs((cur) => cur.filter((x) => x !== r))}
@@ -543,7 +545,7 @@ export const ShellComposer = memo(function ShellComposer({
         enter to send · shift+enter for newline · ↑↓ history ·{" "}
         <span className={cn(mode === "bash" && "text-fail font-semibold")}>! bash</span> ·{" "}
         <span className={cn(mode === "chat" && "text-wrap font-semibold")}>&gt; chat</span> ·{" "}
-        <span className={cn(autocomplete.open && "text-accent font-semibold")}>/ commands · @ files</span>
+        <span className={cn(autocomplete.open && "text-accent font-semibold")}>/ commands · # files</span>
       </p>
     </div>
   );

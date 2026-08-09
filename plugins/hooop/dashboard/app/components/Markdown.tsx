@@ -1,9 +1,10 @@
 "use client";
-import { useMemo } from "react";
+import { createContext, useContext, useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import hljs from "highlight.js/lib/common";
+import { FILE_MENTION, parseFileMention } from "@shared/file-mentions";
 
 /**
  * Markdown renderer for assistant transcripts, peer/host chat, and plan
@@ -22,15 +23,6 @@ import hljs from "highlight.js/lib/common";
  */
 const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
 
-// A file mention at a word boundary: "@" + a path-shaped token (also matches
-// dotfiles like "@.gitignore" and nested paths like "@src/index.ts"), with an
-// optional ":<line>" suffix so a line reference ("@src/index.ts:42") chips as
-// one unit rather than dropping the ":42". The lookbehind keeps it from firing
-// mid-word, so emails (user@host) and scoped-package refs preceded by a letter
-// are left alone; it must start with a word char or "." so a bare "@" or "@@"
-// isn't matched.
-const FILE_MENTION = /(?<=^|\s)@[\w.][\w./-]*(?::\d+)?/g;
-
 interface HastNode {
   type: string;
   tagName?: string;
@@ -45,10 +37,18 @@ function splitFileMentions(value: string): HastNode[] {
   for (const m of value.matchAll(FILE_MENTION)) {
     const start = m.index ?? 0;
     if (start > last) out.push({ type: "text", value: value.slice(last, start) });
+    // The path/line ride along as data attributes rather than being re-parsed
+    // from the rendered text: the chip's children are display text, and the
+    // click target must not depend on scraping them back apart.
+    const { path, line } = parseFileMention(m[0]);
     out.push({
       type: "element",
       tagName: "span",
-      properties: { className: ["hooop-file-chip"] },
+      properties: {
+        className: ["hooop-file-chip"],
+        "data-mention-path": path,
+        ...(line != null ? { "data-mention-line": String(line) } : {}),
+      },
       children: [{ type: "text", value: m[0] }],
     });
     last = start + m[0].length;
@@ -57,14 +57,15 @@ function splitFileMentions(value: string): HastNode[] {
   return out;
 }
 
-// rehype plugin: wrap `@file` mentions in text nodes as chip spans. Skips code /
-// pre subtrees, where "@" is literal source, not a mention.
+// rehype plugin: wrap `#file` mentions in text nodes as chip spans. Skips code /
+// pre subtrees, where "#" is literal source (a comment, usually), not a mention
+// — the same subtrees toClaudeFileRefs refuses to rewrite on the way out.
 function rehypeFileChips() {
   const walk = (node: HastNode) => {
     if (!node.children || node.tagName === "code" || node.tagName === "pre") return;
     const next: HastNode[] = [];
     for (const child of node.children) {
-      if (child.type === "text" && typeof child.value === "string" && child.value.includes("@")) {
+      if (child.type === "text" && typeof child.value === "string" && child.value.includes("#")) {
         next.push(...splitFileMentions(child.value));
       } else {
         walk(child);
@@ -77,6 +78,50 @@ function rehypeFileChips() {
 }
 
 const REHYPE_FILE_CHIPS = [rehypeFileChips];
+
+/** What a `#file` chip hands back when clicked. */
+export type MentionClickHandler = (mention: { path: string; line: number | null }) => void;
+
+// Supplied by <Markdown onFileMention>. Passed by CONTEXT rather than threaded
+// through `components` because COMPONENTS has to stay a module-level constant:
+// react-markdown remounts the subtree when the components object changes
+// identity, so rebuilding it per render would tear down and recreate every node
+// of every message on each transcript update.
+const MentionClickContext = createContext<MentionClickHandler | null>(null);
+
+const CHIP_CLASS =
+  "mx-px inline-flex items-center rounded px-1.5 font-mono text-[11px] font-semibold text-white align-baseline";
+const CHIP_STYLE = { background: "color-mix(in oklab, rgb(var(--sdk)) 55%, black)" };
+
+// Static when nobody's listening, a button when there is a handler. Kept as a
+// real <button> (not a span with onClick) so it's tab-reachable and announced
+// as an action — the chip is the only way to open a file straight from the
+// transcript. A button is phrasing content, so it nests legally in a <p>.
+function FileChip({
+  path,
+  line,
+  children,
+}: {
+  path: string | null;
+  line: number | null;
+  children: React.ReactNode;
+}) {
+  const onMention = useContext(MentionClickContext);
+  if (!onMention || !path) {
+    return <span className={CHIP_CLASS} style={CHIP_STYLE}>{children}</span>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onMention({ path, line })}
+      title={`Open ${path}${line != null ? `:${line}` : ""}`}
+      className={`${CHIP_CLASS} cursor-pointer hover:brightness-125 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50`}
+      style={CHIP_STYLE}
+    >
+      {children}
+    </button>
+  );
+}
 
 const COMPONENTS: Components = {
   p: ({ children }) => <p className="my-1 break-words [overflow-wrap:anywhere]">{children}</p>,
@@ -155,41 +200,54 @@ const COMPONENTS: Components = {
     );
   },
   // Only ever present when the file-chip rehype plugin is active (see below):
-  // an `@file` mention rendered as a compact inline chip instead of plain text.
+  // a `#file` mention rendered as a compact inline chip instead of plain text.
   // Only ever rendered inside a colored chat bubble (host/peer). A solid
   // fill with white text reads clearly against both the green host and blue
   // peer bubbles — a tinted bg + same-hue text doesn't have enough contrast
   // against a saturated bubble color underneath. We use `sdk` (blue) to match
   // the file navigator's reference accent, darkened toward black so it stays
   // legible on the blue peer bubble (see ErrorNotice for the same pattern).
-  span: ({ className, children }) => {
+  span: ({ className, children, ...rest }) => {
     const cls = Array.isArray(className) ? className.join(" ") : className ?? "";
     if (cls.includes("hooop-file-chip")) {
+      const attrs = rest as Record<string, unknown>;
+      const path = typeof attrs["data-mention-path"] === "string" ? attrs["data-mention-path"] : null;
+      const rawLine = attrs["data-mention-line"];
+      const line = typeof rawLine === "string" ? Number(rawLine) : null;
       return (
-        <span
-          className="mx-px inline-flex items-center rounded px-1.5 font-mono text-[11px] font-semibold text-white align-baseline"
-          style={{ background: "color-mix(in oklab, rgb(var(--sdk)) 55%, black)" }}
-        >
+        <FileChip path={path} line={line}>
           {children}
-        </span>
+        </FileChip>
       );
     }
     return <span className={cls || undefined}>{children}</span>;
   },
 };
 
-// `fileChips` opts into `@file` mention chips — enabled for user/peer messages
+// `fileChips` opts into `#file` mention chips — enabled for user/peer messages
 // (the composer's autocomplete inserts these), left off for assistant/plan
-// content where a stray "@token" shouldn't be reinterpreted as a file.
-export function Markdown({ source, fileChips = false }: { source: string; fileChips?: boolean }) {
+// content where a stray "#token" shouldn't be reinterpreted as a file.
+// `onFileMention` additionally makes those chips clickable; without it they
+// render exactly as before, as inert labels.
+export function Markdown({
+  source,
+  fileChips = false,
+  onFileMention,
+}: {
+  source: string;
+  fileChips?: boolean;
+  onFileMention?: MentionClickHandler;
+}) {
   return (
-    <ReactMarkdown
-      remarkPlugins={REMARK_PLUGINS}
-      rehypePlugins={fileChips ? REHYPE_FILE_CHIPS : undefined}
-      components={COMPONENTS}
-    >
-      {source}
-    </ReactMarkdown>
+    <MentionClickContext.Provider value={onFileMention ?? null}>
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={fileChips ? REHYPE_FILE_CHIPS : undefined}
+        components={COMPONENTS}
+      >
+        {source}
+      </ReactMarkdown>
+    </MentionClickContext.Provider>
   );
 }
 

@@ -23,12 +23,17 @@ describe("detectTrigger", () => {
     expect(detectTrigger("/plan", 3)).toEqual({ type: "slash", start: 0, query: "pl" });
   });
 
-  it("opens the file trigger for a bare '@' at the start of the message", () => {
-    expect(detectTrigger("@", 1)).toEqual({ type: "file", start: 0, query: "" });
+  it("opens the file trigger for a bare '#' at the start of the message", () => {
+    expect(detectTrigger("#", 1)).toEqual({ type: "file", start: 0, query: "" });
+  });
+
+  it("no longer opens the file trigger for '@' — that sigil now means a peer", () => {
+    expect(detectTrigger("@", 1)).toBeNull();
+    expect(detectTrigger("look at @a.ts", 13)).toBeNull();
   });
 
   it("opens the file trigger mid-message, after whitespace", () => {
-    const text = "please check @src/inde";
+    const text = "please check #src/inde";
     expect(detectTrigger(text, text.length)).toEqual({
       type: "file",
       start: 13,
@@ -37,9 +42,9 @@ describe("detectTrigger", () => {
   });
 
   it("closes the file trigger once a space is typed after the path", () => {
-    expect(detectTrigger("look at @a.ts now", 9)).toEqual({ type: "file", start: 8, query: "" });
-    expect(detectTrigger("look at @a.ts now", 13)).toEqual({ type: "file", start: 8, query: "a.ts" });
-    expect(detectTrigger("look at @a.ts now", 14)).toBeNull();
+    expect(detectTrigger("look at #a.ts now", 9)).toEqual({ type: "file", start: 8, query: "" });
+    expect(detectTrigger("look at #a.ts now", 13)).toEqual({ type: "file", start: 8, query: "a.ts" });
+    expect(detectTrigger("look at #a.ts now", 14)).toBeNull();
   });
 
   it("returns null when the caret isn't inside any trigger token", () => {
@@ -59,15 +64,15 @@ describe("spliceTrigger", () => {
     expect(result).toEqual({ text: "/plan ", cursor: 6 });
   });
 
-  it("replaces the @token in place, preserving text before and after", () => {
-    const text = "please check @src/inde";
+  it("replaces the #token in place, preserving text before and after", () => {
+    const text = "please check #src/inde";
     const result = spliceTrigger(
       text,
       text.length,
       { type: "file", start: 13, query: "src/inde" },
-      "@src/index.ts",
+      "#src/index.ts",
     );
-    expect(result).toEqual({ text: "please check @src/index.ts ", cursor: 27 });
+    expect(result).toEqual({ text: "please check #src/index.ts ", cursor: 27 });
   });
 
   it("preserves trailing text after the caret", () => {

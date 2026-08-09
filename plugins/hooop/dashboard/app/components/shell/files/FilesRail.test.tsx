@@ -329,4 +329,15 @@ describe("FilesRail — keyboard and screen-reader access", () => {
     fireEvent.keyDown(screen.getByLabelText("Insert README.md as a reference"), { key: "Enter" });
     expect(openFile).not.toHaveBeenCalled();
   });
+
+  it("inserts the reference with the '#' sigil, not '@'", () => {
+    // Pinned because the sigils are now split — "#" is a file, "@" is a peer —
+    // and the two producers (this rail and ShellFilesDock) have to agree with
+    // the composer's trigger and with shared/file-mentions. Nothing else fails
+    // if this drifts: the mention would just reach claude as ordinary prose and
+    // the file would silently never be read.
+    mount(tree());
+    fireEvent.click(screen.getByLabelText("Insert README.md as a reference"));
+    expect(insertReference).toHaveBeenCalledWith("#README.md");
+  });
 });
