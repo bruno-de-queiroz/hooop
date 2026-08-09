@@ -27,9 +27,21 @@ describe("detectTrigger", () => {
     expect(detectTrigger("#", 1)).toEqual({ type: "file", start: 0, query: "" });
   });
 
-  it("no longer opens the file trigger for '@' — that sigil now means a peer", () => {
-    expect(detectTrigger("@", 1)).toBeNull();
-    expect(detectTrigger("look at @a.ts", 13)).toBeNull();
+  it("opens the PEER trigger for '@', not the file one", () => {
+    expect(detectTrigger("@", 1)).toEqual({ type: "peer", start: 0, query: "" });
+    expect(detectTrigger("ask @sa", 7)).toEqual({ type: "peer", start: 4, query: "sa" });
+  });
+
+  it("does not open the peer trigger inside an email address", () => {
+    // No whitespace before the "@", so the word-boundary anchor refuses it —
+    // otherwise typing an address would pop the roster mid-word.
+    expect(detectTrigger("mail bruno@example.com", 22)).toBeNull();
+    expect(detectTrigger("mail bruno@ex", 13)).toBeNull();
+  });
+
+  it("closes the peer trigger once a space is typed after the handle", () => {
+    expect(detectTrigger("ask @sam now", 8)).toEqual({ type: "peer", start: 4, query: "sam" });
+    expect(detectTrigger("ask @sam now", 9)).toBeNull();
   });
 
   it("opens the file trigger mid-message, after whitespace", () => {
@@ -83,5 +95,16 @@ describe("spliceTrigger", () => {
       "/plan",
     );
     expect(result).toEqual({ text: "/plan  more text", cursor: 6 });
+  });
+});
+
+describe("triggerType", () => {
+  it("names which affordance is live, so the hint bar lights only that one", () => {
+    // A single "something is open" flag lit the file/command hint while the
+    // user was typing an @peer.
+    expect(detectTrigger("/pl", 3)?.type).toBe("slash");
+    expect(detectTrigger("#a", 2)?.type).toBe("file");
+    expect(detectTrigger("@s", 2)?.type).toBe("peer");
+    expect(detectTrigger("plain", 5)).toBeNull();
   });
 });

@@ -277,3 +277,84 @@ describe("Markdown — #file mention chips", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 });
+
+describe("Markdown — @peer mention chips", () => {
+  const peers = [
+    { handle: "sam", name: "Sam" },
+    { handle: "bruno-de-queiroz", name: "Bruno de Queiroz" },
+  ];
+
+  it("chips a handle that is in the roster, showing the DISPLAY NAME", () => {
+    // The message text carries "@sam" (that's what matching and notification
+    // targeting read); the bubble should read "@Sam".
+    const { container } = render(<Markdown source="ask @sam about it" fileChips peers={peers} />);
+    const chip = [...container.querySelectorAll("span")].find((e) => e.textContent === "@Sam");
+    expect(chip).toBeDefined();
+    expect(container.textContent).toBe("ask @Sam about it");
+  });
+
+  it("shows a multi-word display name the handle could never carry", () => {
+    const { container } = render(
+      <Markdown source="ping @bruno-de-queiroz" fileChips peers={peers} />,
+    );
+    expect(container.textContent).toBe("ping @Bruno de Queiroz");
+  });
+
+  it("leaves an @token that is nobody as prose", () => {
+    // The roster check is what keeps "@types/node" out of the chip treatment.
+    const { container } = render(<Markdown source="install @types/node now" fileChips peers={peers} />);
+    expect([...container.querySelectorAll("span")].some((e) => e.textContent === "@types")).toBe(false);
+    expect(container.textContent).toContain("@types/node");
+  });
+
+  it("does not chip inside an email address", () => {
+    const { container } = render(<Markdown source="mail sam@sam.dev" fileChips peers={peers} />);
+    expect([...container.querySelectorAll("span")].some((e) => e.textContent === "@Sam")).toBe(false);
+    expect(container.textContent).toContain("sam@sam.dev");
+  });
+
+  it("chips nothing when there is no roster", () => {
+    const { container } = render(<Markdown source="ask @sam" fileChips />);
+    expect(container.textContent).toBe("ask @sam");
+  });
+
+  it("marks a mention of the viewer differently from a mention of someone else", () => {
+    const { container } = render(
+      <Markdown source="@sam and @bruno-de-queiroz" fileChips peers={peers} mePeer="sam" />,
+    );
+    const mine = [...container.querySelectorAll("span")].find((e) => e.textContent === "@Sam");
+    const other = [...container.querySelectorAll("span")].find((e) => e.textContent === "@Bruno de Queiroz");
+    expect(mine?.getAttribute("style")).not.toBe(other?.getAttribute("style"));
+    // The neutral chip inverts with the theme; only "mentions you" carries a
+    // hue, so the two fills must come from different tokens.
+    expect(mine?.getAttribute("style")).toContain("--accent-press");
+    expect(other?.getAttribute("style")).toContain("--ink");
+  });
+
+  it("renders file and peer mentions together, in document order", () => {
+    // The two patterns are scanned separately, so their hits have to be merged
+    // back in order or the surrounding text fragments come out shuffled.
+    const { container } = render(
+      <Markdown source="hey @sam look at #src/a.ts please" fileChips peers={peers} />,
+    );
+    expect(container.textContent).toBe("hey @Sam look at #src/a.ts please");
+  });
+
+  it("puts a file mention before a peer mention back in the right order too", () => {
+    const { container } = render(
+      <Markdown source="#src/a.ts then @sam" fileChips peers={peers} />,
+    );
+    expect(container.textContent).toBe("#src/a.ts then @Sam");
+  });
+
+  it("does not chip a handle inside a fenced code block", () => {
+    // Asserted on the CHIP, not on the text: highlight.js wraps code tokens in
+    // spans of their own, so "is there a span saying @sam" is always true here.
+    const { container } = render(<Markdown source={"```\n@sam\n```"} fileChips peers={peers} />);
+    const chips = [...container.querySelectorAll("span")].filter(
+      (e) => e.className.includes("align-baseline") && e.textContent?.startsWith("@"),
+    );
+    expect(chips).toHaveLength(0);
+    expect(container.textContent).toContain("@sam");
+  });
+});

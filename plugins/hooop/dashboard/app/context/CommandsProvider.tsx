@@ -12,7 +12,7 @@ export interface AutocompleteEntry {
   /** One-line subtext. */
   description: string | null;
   /** Used to colour the chip in the popover. */
-  kind: "command" | "skill" | "builtin" | "file" | "dir";
+  kind: "command" | "skill" | "builtin" | "file" | "dir" | "peer";
   /** Source plugin/owner for the row, when meaningful. */
   source?: string | null;
   /** Capability the viewer needs for this command (mirrors SlashCommand.requires).
@@ -38,6 +38,10 @@ const KIND_RANK: Record<AutocompleteEntry["kind"], number> = {
   skill: 2,
   file: 3,
   dir: 3,
+  // Never actually sorted with the others — peers come from their own trigger
+  // and their own hook — but KIND_RANK is a total map over the union, so the
+  // key has to exist or adding it to the type would be a silent hole.
+  peer: 4,
 };
 
 /**

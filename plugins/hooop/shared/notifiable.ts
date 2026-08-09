@@ -24,6 +24,7 @@
  */
 
 import { isHiddenTurnKind } from "./turn-kinds";
+import { extractMentions } from "./handles";
 
 export type NotifyCategory =
   /** The agent is blocked on a human: a permission ask, a question, a plan review. */
@@ -32,6 +33,16 @@ export type NotifyCategory =
   | "turn-complete"
   /** A human participant said something. */
   | "chat"
+  /**
+   * A human participant said something AND named you in it.
+   *
+   * Per-RECIPIENT, so it is never produced by classifyEvent (which sees one
+   * event, not an audience) — the delivery layer promotes a "chat" to this for
+   * the people its `mentions` actually names. Louder than chat by design: it
+   * carries through a mute, because being called over by name is the one
+   * message you asked not to miss.
+   */
+  | "mention"
   /** Someone redeemed a share link and is waiting to be admitted. */
   | "join-request"
   /**
@@ -78,6 +89,15 @@ export interface Classification {
   title: string;
   /** Human-readable detail; may be empty when the event carries no text. */
   body: string;
+  /**
+   * `@handle`s named in the message (see @shared/handles), lowercased and
+   * without the sigil. Empty for everything that isn't a human message.
+   *
+   * Carried rather than resolved here on purpose: who these ARE depends on the
+   * audience, which classification cannot see. The delivery layer matches them
+   * against each subscriber.
+   */
+  mentions: string[];
 }
 
 /**
@@ -108,6 +128,7 @@ const MESSAGE_HOOKS: ReadonlySet<string> = new Set([
  */
 export const UNSEEN_CATEGORIES: ReadonlySet<NotifyCategory> = new Set<NotifyCategory>([
   "chat",
+  "mention",
   "turn-complete",
 ]);
 
@@ -210,6 +231,7 @@ export function classifyEvent(e: NotifiableEvent): Classification | null {
 
   if (hook === "PeerJoinRequest") {
     return {
+      mentions: [],
       category: "join-request",
       title: "Someone wants to join",
       body: ctxText(e, "message") || stripEnvelope(text) || "A guest asked to join this session.",
@@ -217,7 +239,7 @@ export function classifyEvent(e: NotifiableEvent): Classification | null {
   }
 
   if (hook === "PermissionRequest") {
-    return { category: "attention", ...attentionCopy(e) };
+    return { mentions: [], category: "attention", ...attentionCopy(e) };
   }
 
   // A preview reaching a terminal state. Only these two: "starting" is not news,
@@ -231,6 +253,7 @@ export function classifyEvent(e: NotifiableEvent): Classification | null {
   // events are not.
   if (hook === "PreviewNeedsViewer") {
     return {
+      mentions: [],
       category: "preview",
       title: "The agent needs the preview open",
       body: ctxText(e, "message") || stripEnvelope(text)
@@ -241,6 +264,7 @@ export function classifyEvent(e: NotifiableEvent): Classification | null {
   if (hook === "PreviewStarted" || hook === "PreviewFailed") {
     const failed = hook === "PreviewFailed";
     return {
+      mentions: [],
       category: "preview",
       title: failed ? "Preview failed to start" : "Preview is live",
       body: ctxText(e, "message") || stripEnvelope(text)
@@ -261,6 +285,7 @@ export function classifyEvent(e: NotifiableEvent): Classification | null {
     // `text` still decides EMPTINESS (callers and countsAsUnseen both key off a
     // contentless Stop), but what we show is the assistant's actual reply.
     return {
+      mentions: [],
       category: "turn-complete",
       title: "Agent finished",
       body: text ? ctxText(e, "last_assistant_message") || stripEnvelope(text) : "",
@@ -268,10 +293,16 @@ export function classifyEvent(e: NotifiableEvent): Classification | null {
   }
 
   // UserPromptSubmit / Chat — a human said something.
+  const body = ctxText(e, "prompt") || stripEnvelope(text);
   return {
     category: "chat",
     title: e.author ? `${e.author} sent a message` : "New message",
-    body: ctxText(e, "prompt") || stripEnvelope(text),
+    body,
+    // Read from the body (what the human actually wrote), never from `text`,
+    // which can still be wrapped in an envelope. Stays "chat" here: only the
+    // delivery layer knows who is listening, so only it can promote this to a
+    // "mention" for the people named.
+    mentions: extractMentions(body),
   };
 }
 

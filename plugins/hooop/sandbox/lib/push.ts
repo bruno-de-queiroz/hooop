@@ -6,6 +6,7 @@ import { STATE_DIR } from "./paths";
 import { onSharesRevoked, type ShareCapability } from "./shares";
 import { eventBus } from "./ingestor";
 import { classifyEvent, type NotifyCategory } from "@shared/notifiable";
+import { toHandle } from "@shared/handles";
 import { log } from "@shared/logger";
 
 /**
@@ -522,22 +523,49 @@ export async function notifyForEvent(event: {
     sessionId,
   };
 
+  // Was THIS subscriber named in the message? Handles are derived from the
+  // display name snapshotted at subscribe time, so no lookup into the roster is
+  // needed here (and this module stays independent of shares.ts).
+  //
+  // Known limit: toHandle can't disambiguate two participants with the SAME
+  // display name the way the roster's deriveHandles does — the roster would
+  // call them "sam" and "sam-2", while both subscriptions compute "sam". So the
+  // second Sam isn't reachable by handle, and the first is pinged for either.
+  // Rare, cosmetic, and it fails toward notifying rather than staying silent.
+  const mentioned = (r: PushSubscriptionRecord): boolean =>
+    classified.mentions.length > 0
+    && !!r.displayName
+    && classified.mentions.includes(toHandle(r.displayName));
+
   const targets = [...subscriptions.values()].filter((r) => {
     const ownerKey = ownerKeyFor(r.ownerKind, r.shareId);
     if (!mayReceive(r, classified.category, sessionId)) return false;
     if (!DELIVER_TO_AUTHOR_TOO.has(classified.category) && isSelfAuthored(r, event.author)) return false;
+    // Still suppressed while they are looking at the session: a mention is
+    // louder than a message, not louder than the screen it's already on.
     if (isWatching(ownerKey, sessionId)) return false;
-    if (isMuted(ownerKey, sessionId)) return false;
+    // A mute silences the room, not your name being called.
+    if (isMuted(ownerKey, sessionId) && !mentioned(r)) return false;
     return true;
   });
   if (targets.length === 0) return { sent: 0 };
 
   const { publicKey, privateKey } = vapid();
   const results = await Promise.all(targets.map(async (r) => {
+    // Per-recipient: the same event is a "mention" for the people it names and
+    // an ordinary "chat" for everyone else, so the payload is built here rather
+    // than once above.
+    const forThem: OutgoingNotification = mentioned(r)
+      ? {
+          ...payload,
+          category: "mention",
+          title: event.author ? `${event.author} mentioned you` : "You were mentioned",
+        }
+      : payload;
     try {
       await webpush.sendNotification(
         { endpoint: r.endpoint, keys: r.keys },
-        JSON.stringify(payload),
+        JSON.stringify(forThem),
         {
           vapidDetails: { subject: VAPID_SUBJECT, publicKey, privateKey },
           TTL: 600,

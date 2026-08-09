@@ -200,6 +200,8 @@ const HostBubble = memo(function HostBubble({
   chat = false,
   onOpenImage,
   onOpenMention,
+  peers,
+  mePeer,
 }: {
   row: EventRow;
   // `mine` drives color only: my own turns are green (host bubble), everyone
@@ -216,6 +218,9 @@ const HostBubble = memo(function HostBubble({
   // Open a clicked `#file` chip in the navigator + preview. Same stability rule
   // as onOpenImage; omitted → chips render as inert labels.
   onOpenMention?: MentionClickHandler;
+  // Everyone in the session, so `@peer` mentions chip (and only real ones do).
+  peers?: readonly { handle: string; name: string }[];
+  mePeer?: string | null;
 }) {
   const text = userPromptText(row);
   const images = Array.isArray(row.images) ? row.images : [];
@@ -253,7 +258,7 @@ const HostBubble = memo(function HostBubble({
       >
         {text && (
           <div className="break-words">
-            <Markdown source={text} fileChips onFileMention={onOpenMention} />
+            <Markdown source={text} fileChips onFileMention={onOpenMention} peers={peers} mePeer={mePeer} />
           </div>
         )}
         {images.length > 0 && (
@@ -907,6 +912,8 @@ export const ShellTranscript = memo(function ShellTranscript({
   viewerName = "Host",
   typingLabel = "",
   onOpenMention,
+  peers,
+  mePeer,
 }: {
   events: EventRow[];
   hasMore: boolean;
@@ -924,6 +931,13 @@ export const ShellTranscript = memo(function ShellTranscript({
   // stable (see openImage) or every bubble re-renders. Omitted → chips are
   // inert, which is what standalone renders and tests get.
   onOpenMention?: MentionClickHandler;
+  // Everyone currently in the session, so an `@peer` mention chips — and only a
+  // real one does, leaving "@types/node" as prose. Carries the display name
+  // because the chip shows THAT, not the handle. Markdown memoises on the
+  // flattened value, so a fresh array each heartbeat costs nothing.
+  peers?: readonly { handle: string; name: string }[];
+  /** The viewer's own handle: a mention OF them is tinted differently. */
+  mePeer?: string | null;
 }) {
   const viewer: Viewer = { kind: viewerKind, name: viewerName };
 
@@ -1141,7 +1155,7 @@ export const ShellTranscript = memo(function ShellTranscript({
         } else if (e.kind === "command") {
           pushNode(`u-${e.id}`, <CommandCard row={e} />);
         } else {
-          pushNode(`u-${e.id}`, <HostBubble row={e} mine={isMine(e, viewer)} onOpenImage={openImage} onOpenMention={onOpenMention} />);
+          pushNode(`u-${e.id}`, <HostBubble row={e} mine={isMine(e, viewer)} onOpenImage={openImage} onOpenMention={onOpenMention} peers={peers} mePeer={mePeer} />);
         }
         break;
       case "Stop":
@@ -1192,7 +1206,7 @@ export const ShellTranscript = memo(function ShellTranscript({
         break;
       }
       case "Chat":
-        pushNode(`c-${e.id}`, <HostBubble row={e} mine={isMine(e, viewer)} chat onOpenImage={openImage} onOpenMention={onOpenMention} />);
+        pushNode(`c-${e.id}`, <HostBubble row={e} mine={isMine(e, viewer)} chat onOpenImage={openImage} onOpenMention={onOpenMention} peers={peers} mePeer={mePeer} />);
         break;
       case "PermissionRequest":
       case "PermissionResponse":

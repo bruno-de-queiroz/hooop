@@ -241,3 +241,30 @@ describe("body shaping", () => {
     expect(long!.body.endsWith("…")).toBe(true);
   });
 });
+
+describe("classifyEvent — mentions", () => {
+  it("carries the handles a human message names, still as a chat", () => {
+    // Stays "chat" here on purpose: classification sees one event, not an
+    // audience, so it cannot know whether anyone present is actually named.
+    // Promotion to "mention" is the delivery layer's call, per recipient.
+    const c = classifyEvent({
+      session_id: "s1",
+      hook_type: "UserPromptSubmit",
+      author: "Bruno",
+      text: "hey @sam can you look at this",
+    });
+    expect(c?.category).toBe("chat");
+    expect(c?.mentions).toEqual(["sam"]);
+  });
+
+  it("carries no mentions for a message that names nobody", () => {
+    const c = classifyEvent({ session_id: "s1", hook_type: "UserPromptSubmit", text: "no names here" });
+    expect(c?.mentions).toEqual([]);
+  });
+
+  it("carries no mentions on non-message events", () => {
+    const c = classifyEvent({ session_id: "s1", hook_type: "Stop", text: "done @sam" });
+    expect(c?.category).toBe("turn-complete");
+    expect(c?.mentions).toEqual([]);
+  });
+});

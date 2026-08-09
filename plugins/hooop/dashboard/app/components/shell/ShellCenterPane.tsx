@@ -28,7 +28,7 @@ export function ShellCenterPane() {
   const active = useActiveSession();
   const { selectedId, setSelected } = useSelectedSession();
   const { sessions, deleteSession } = useSessions();
-  const { participants, setTyping } = usePresence(selectedId);
+  const { participants, setTyping, me } = usePresence(selectedId);
   const [shareOpen, setShareOpen] = useState(false);
   // Peers reach the share dialog in peerMode (no tunnel control; only full peers
   // ever see the trigger). Mount-gated to keep hydration stable.
@@ -50,6 +50,14 @@ export function ShellCenterPane() {
     .join(", ");
   // Stable so the memoized transcript isn't re-rendered by every presence beat.
   const onLoadMore = useCallback(() => void active.loadMore(), [active]);
+
+  // Mentionable handles, and our own. Both are recomputed on every presence
+  // heartbeat, which is fine: Markdown memoises its rehype plugin on the JOINED
+  // handles, so a fresh array with the same contents costs nothing downstream.
+  const peerHandles = participants
+    .filter((p): p is typeof p & { handle: string } => !!p.handle)
+    .map((p) => ({ handle: p.handle, name: p.name }));
+  const myHandle = participants.find((p) => p.participantId === me)?.handle ?? null;
 
   // Clicking a `#file` chip in the transcript opens the navigator AND the
   // preview — the same three moves the "files to review" pill makes, and
@@ -180,6 +188,8 @@ export function ShellCenterPane() {
         viewerName={viewerName}
         typingLabel={typingLabel}
         onOpenMention={onOpenMention}
+        peers={peerHandles}
+        mePeer={myHandle}
       />
       <ShellPlanReviewCard />
       <ShellPermissions />

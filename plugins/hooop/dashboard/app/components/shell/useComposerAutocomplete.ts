@@ -2,23 +2,24 @@
 import { useMemo, useRef, useState } from "react";
 import { useCommands, type AutocompleteEntry } from "@/app/context/CommandsProvider";
 import { useFiles } from "@/app/context/useFiles";
+import { usePeers } from "@/app/context/usePeers";
 import { canDecidePermissions, useMounted } from "../lib/participant";
 
 export interface ComposerTrigger {
-  type: "slash" | "file";
-  /** Index into the text where the trigger character ("/" or "#") sits. */
+  type: "slash" | "file" | "peer";
+  /** Index into the text where the trigger character ("/", "#" or "@") sits. */
   start: number;
   /** Text typed after the trigger character, up to the caret. */
   query: string;
 }
 
 /**
- * Resolves the active `/` or `#` trigger (if any) given the composer's
+ * Resolves the active `/`, `#` or `@` trigger (if any) given the composer's
  * text and caret offset. `/` only fires when it's the very first
  * character and no space has been typed yet — a slash command is the
  * whole message, mirroring how `!bash` / `>chat` mode-detection already
- * works. `#` fires at the start of the current whitespace-delimited
- * word, anywhere in the text — an inline file mention.
+ * works. `#` (a file) and `@` (a peer) fire at the start of the current
+ * whitespace-delimited word, anywhere in the text.
  */
 export function detectTrigger(text: string, cursor: number): ComposerTrigger | null {
   const before = text.slice(0, cursor);
@@ -30,6 +31,15 @@ export function detectTrigger(text: string, cursor: number): ComposerTrigger | n
   if (hash) {
     const start = before[hash.index] === "#" ? hash.index : hash.index + 1;
     return { type: "file", start, query: hash[1] };
+  }
+
+  // Word-boundary anchored like `#`, which also keeps it off an email address:
+  // "mail bruno@example.com" has no whitespace before the "@", so it never
+  // opens the roster mid-address.
+  const at = /(?:^|\s)@(\S*)$/.exec(before);
+  if (at) {
+    const start = before[at.index] === "@" ? at.index : at.index + 1;
+    return { type: "peer", start, query: at[1] };
   }
 
   return null;
@@ -63,8 +73,8 @@ export function removeTriggerToken(
   return { text: before + after, cursor: before.length };
 }
 
-// A resolved autocomplete pick: `/command` splices inline ("text"); `#file`
-// becomes a removable chip ("ref", with the partial token stripped from text).
+// A resolved autocomplete pick: `/command` and `@peer` splice inline ("text");
+// `#file` becomes a removable chip ("ref", with the partial token stripped).
 export type AutocompleteSelectResult =
   | { kind: "text"; text: string; cursor: number }
   | { kind: "ref"; ref: string; text: string; cursor: number };
@@ -73,6 +83,9 @@ export type ComposerAutocompleteAction = "navigated" | "select" | "close" | null
 
 export interface UseComposerAutocompleteResult {
   open: boolean;
+  /** WHICH trigger is active, so the hint bar can light up the one affordance
+   *  in play instead of all of them. Null when nothing is triggered. */
+  triggerType: ComposerTrigger["type"] | null;
   entries: AutocompleteEntry[];
   activeIndex: number;
   setActiveIndex: (i: number) => void;
@@ -87,7 +100,9 @@ export interface UseComposerAutocompleteResult {
   onKeyDown: (e: { key: string; shiftKey?: boolean }) => ComposerAutocompleteAction;
   /**
    * Resolves the active (or given) entry at the trigger position. A `/command`
-   * returns an inline `"text"` splice; a `#file` returns a `"ref"` (the mention
+   * and an `@peer` return an inline `"text"` splice — a peer mention reads as
+   * part of the sentence ("@sam can you look at this"), so it stays in the
+   * prose rather than becoming a chip. A `#file` returns a `"ref"` (the mention
    * for a chip, with the partial `#query` stripped from the text). Null if
    * there's no active trigger or no entry to insert.
    */
@@ -101,6 +116,7 @@ export function useComposerAutocomplete(): UseComposerAutocompleteResult {
 
   const { entries: commandEntries } = useCommands();
   const { entries: fileEntries } = useFiles(trigger?.type === "file" ? trigger.query : null);
+  const { entries: peerEntries } = usePeers(trigger?.type === "peer" ? trigger.query : null);
 
   // Hide commands the viewer can't actually run (e.g. `/auto-mode` for a
   // drive/spectate peer) — mirrors the header pill / permission bubble, which
@@ -113,12 +129,13 @@ export function useComposerAutocomplete(): UseComposerAutocompleteResult {
   const entries = useMemo<AutocompleteEntry[]>(() => {
     if (!trigger) return [];
     if (trigger.type === "file") return fileEntries;
+    if (trigger.type === "peer") return peerEntries;
     const q = trigger.query.toLowerCase();
     return commandEntries
       .filter((e) => e.requires !== "permission" || canPermission)
       .filter((e) => e.label.toLowerCase().includes(q))
       .slice(0, 20);
-  }, [trigger, commandEntries, fileEntries, canPermission]);
+  }, [trigger, commandEntries, fileEntries, peerEntries, canPermission]);
 
   // A fresh trigger (new token, or the query within it changed) always
   // restarts the highlight at the top of the list. Adjusted during render
@@ -185,6 +202,7 @@ export function useComposerAutocomplete(): UseComposerAutocompleteResult {
 
   return {
     open: trigger !== null,
+    triggerType: trigger?.type ?? null,
     entries,
     activeIndex: clampedActiveIndex,
     setActiveIndex,

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { parseJsonBody, errorResponse, boundedString } from "@/lib/api-helpers";
-import { participantOf, forwardedParticipant } from "@/lib/peer-auth";
+import { participantOf, forwardedParticipant, canAccessSession } from "@/lib/peer-auth";
 import { heartbeat, leave, listPresence } from "@/lib/presence";
 import { client } from "@/lib/sandbox-client";
 
@@ -15,6 +15,32 @@ interface Body {
   /** Whether the viewer's tab is in the foreground (document.visibilityState).
    * Absent → treated as active. Drives the `away` (dimmed) presence state. */
   active?: boolean;
+}
+
+/**
+ * Read-only roster, backing the composer's `@peer` mention autocomplete.
+ *
+ * Separate from the POST on purpose: that one ASSERTS presence (and relays the
+ * beat to the sandbox), so using it to populate a dropdown would make merely
+ * opening the autocomplete claim the viewer is here and suppress their own
+ * notifications. This one only reads.
+ *
+ * Stricter than the POST about which session it will answer for, because it
+ * discloses the other participants' display names rather than just recording
+ * the caller's own.
+ */
+export async function GET(req: NextRequest) {
+  const who = participantOf(req);
+  if (who.kind === "none") return errorResponse("forbidden", 403);
+
+  const sessionId = new URL(req.url).searchParams.get("sessionId");
+  if (!sessionId) return errorResponse("missing required query param: sessionId", 400);
+  if (!canAccessSession(req, sessionId)) return errorResponse("forbidden", 403);
+
+  // `me` so the caller can drop itself from the list without matching on a
+  // display name, which two participants are free to share.
+  const me = who.kind === "host" ? "host" : `peer:${who.shareId}`;
+  return Response.json({ participants: listPresence(sessionId), me });
 }
 
 /**
@@ -54,5 +80,7 @@ export async function POST(req: NextRequest) {
     .pushPresence(sessionId, active && !body.leaving, forwardedParticipant(req))
     .catch(() => { /* non-fatal: the beat just ages out and we notify */ });
 
-  return Response.json({ participants: listPresence(sessionId) });
+  // `me` so the viewer can find itself in the roster by id rather than by
+  // display name, which two participants are free to share.
+  return Response.json({ participants: listPresence(sessionId), me: participantId });
 }

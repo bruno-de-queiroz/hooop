@@ -31,53 +31,118 @@ interface HastNode {
   properties?: Record<string, unknown>;
 }
 
-function splitFileMentions(value: string): HastNode[] {
-  const out: HastNode[] = [];
-  let last = 0;
+// A `@handle` at a word boundary. The same lookbehind as FILE_MENTION, which is
+// what keeps it out of an email address: "bruno@example.com" has no whitespace
+// before the "@". Handles are slugs (see @shared/handles), so the character
+// class is deliberately narrow.
+const PEER_MENTION = /(?<=^|\s)@[a-z0-9-]+/g;
+
+/** Splits one text node into plain text and chip elements. `peers` maps each
+ *  handle currently in the session to its display name: an `@token` that isn't
+ *  one of them is left as prose, so "@types/node" and a mention of someone who
+ *  has left don't chip. */
+function splitMentions(
+  value: string,
+  peers: ReadonlyMap<string, string>,
+  me: string | null,
+): HastNode[] {
+  type Hit = { start: number; end: number; node: HastNode };
+  const hits: Hit[] = [];
+
   for (const m of value.matchAll(FILE_MENTION)) {
     const start = m.index ?? 0;
-    if (start > last) out.push({ type: "text", value: value.slice(last, start) });
     // The path/line ride along as data attributes rather than being re-parsed
     // from the rendered text: the chip's children are display text, and the
     // click target must not depend on scraping them back apart.
     const { path, line } = parseFileMention(m[0]);
-    out.push({
-      type: "element",
-      tagName: "span",
-      properties: {
-        className: ["hooop-file-chip"],
-        "data-mention-path": path,
-        ...(line != null ? { "data-mention-line": String(line) } : {}),
+    hits.push({
+      start,
+      end: start + m[0].length,
+      node: {
+        type: "element",
+        tagName: "span",
+        properties: {
+          className: ["hooop-file-chip"],
+          "data-mention-path": path,
+          ...(line != null ? { "data-mention-line": String(line) } : {}),
+        },
+        children: [{ type: "text", value: m[0] }],
       },
-      children: [{ type: "text", value: m[0] }],
     });
-    last = start + m[0].length;
+  }
+
+  if (peers.size > 0) {
+    for (const m of value.matchAll(PEER_MENTION)) {
+      const handle = m[0].slice(1);
+      const name = peers.get(handle);
+      if (name === undefined) continue;
+      const start = m.index ?? 0;
+      hits.push({
+        start,
+        end: start + m[0].length,
+        node: {
+          type: "element",
+          tagName: "span",
+          properties: {
+            className: ["hooop-peer-chip"],
+            "data-mention-handle": handle,
+            // Resolved HERE, where `me` is known, rather than compared in the
+            // renderer against an attribute that would have to be threaded in
+            // some other way.
+            ...(me != null && handle === me ? { "data-mention-mine": "1" } : {}),
+          },
+          // Shows the DISPLAY NAME, not the handle. The handle exists so a
+          // mention can be typed and matched; it is not what anyone calls this
+          // person. The message text still carries "@bruno-de-queiroz" — which
+          // is what notification targeting reads — while the bubble reads
+          // "@Bruno de Queiroz".
+          children: [{ type: "text", value: `@${name}` }],
+        },
+      });
+    }
+  }
+
+  if (hits.length === 0) return [{ type: "text", value }];
+  // The two patterns are scanned independently, so the hits have to be put back
+  // in document order before slicing — otherwise a message with a peer mention
+  // before a file mention would emit its text fragments shuffled.
+  hits.sort((a, b) => a.start - b.start);
+
+  const out: HastNode[] = [];
+  let last = 0;
+  for (const h of hits) {
+    if (h.start < last) continue; // overlapping match; first one wins
+    if (h.start > last) out.push({ type: "text", value: value.slice(last, h.start) });
+    out.push(h.node);
+    last = h.end;
   }
   if (last < value.length) out.push({ type: "text", value: value.slice(last) });
   return out;
 }
 
-// rehype plugin: wrap `#file` mentions in text nodes as chip spans. Skips code /
-// pre subtrees, where "#" is literal source (a comment, usually), not a mention
-// — the same subtrees toClaudeFileRefs refuses to rewrite on the way out.
-function rehypeFileChips() {
-  const walk = (node: HastNode) => {
-    if (!node.children || node.tagName === "code" || node.tagName === "pre") return;
-    const next: HastNode[] = [];
-    for (const child of node.children) {
-      if (child.type === "text" && typeof child.value === "string" && child.value.includes("#")) {
-        next.push(...splitFileMentions(child.value));
-      } else {
-        walk(child);
-        next.push(child);
+// rehype plugin: wrap `#file` and `@peer` mentions in text nodes as chip spans.
+// Skips code / pre subtrees, where "#" is literal source (a comment, usually)
+// rather than a mention — the same subtrees toClaudeFileRefs refuses to rewrite
+// on the way out.
+function rehypeMentions(peers: ReadonlyMap<string, string>, me: string | null) {
+  return () => {
+    const walk = (node: HastNode) => {
+      if (!node.children || node.tagName === "code" || node.tagName === "pre") return;
+      const next: HastNode[] = [];
+      for (const child of node.children) {
+        const v = child.type === "text" ? child.value : undefined;
+        if (typeof v === "string" && (v.includes("#") || v.includes("@"))) {
+          next.push(...splitMentions(v, peers, me));
+        } else {
+          walk(child);
+          next.push(child);
+        }
       }
-    }
-    node.children = next;
+      node.children = next;
+    };
+    return (tree: HastNode) => walk(tree);
   };
-  return (tree: HastNode) => walk(tree);
 }
-
-const REHYPE_FILE_CHIPS = [rehypeFileChips];
 
 /** What a `#file` chip hands back when clicked. */
 export type MentionClickHandler = (mention: { path: string; line: number | null }) => void;
@@ -89,8 +154,11 @@ export type MentionClickHandler = (mention: { path: string; line: number | null 
 // of every message on each transcript update.
 const MentionClickContext = createContext<MentionClickHandler | null>(null);
 
-const CHIP_CLASS =
-  "mx-px inline-flex items-center rounded px-1.5 font-mono text-[11px] font-semibold text-white align-baseline";
+// Shared chip geometry. The COLOUR is deliberately not in here: the file chip
+// is always white-on-dark, while a peer chip inverts with the theme.
+const CHIP_BASE =
+  "mx-px inline-flex items-center rounded px-1.5 font-mono text-[11px] font-semibold align-baseline";
+const CHIP_CLASS = `${CHIP_BASE} text-white`;
 const CHIP_STYLE = { background: "color-mix(in oklab, rgb(var(--sdk)) 55%, black)" };
 
 // Static when nobody's listening, a button when there is a handler. Kept as a
@@ -120,6 +188,30 @@ function FileChip({
     >
       {children}
     </button>
+  );
+}
+
+// A `@handle` mention. Not interactive: it names a person, and there is nothing
+// to open. It IS marked differently when it names YOU, which is the whole point
+// of the sigil — the salience is the feature, not the link.
+//
+// The neutral chip INVERTS with the theme (ink fill, elevated text) rather than
+// picking a hue. That is what makes it safe: it sits on four different
+// backgrounds — the dark green/blue bubbles of the dark theme and the pale
+// green/blue of the light one — and any fixed hue is muddy on at least one of
+// them. Inverting guarantees separation from the bubble in both.
+//
+// "Mentions you" uses --accent-press, the darker pink already in the palette
+// for :active, rather than the raw --accent: at 11px the full-strength accent
+// glares against a saturated bubble.
+const PEER_CHIP = { background: "rgb(var(--ink))", color: "rgb(var(--elevated))" };
+const PEER_CHIP_MINE = { background: "rgb(var(--accent-press))", color: "#fff" };
+
+function PeerChip({ mine, children }: { mine: boolean; children: React.ReactNode }) {
+  return (
+    <span className={CHIP_BASE} style={mine ? PEER_CHIP_MINE : PEER_CHIP}>
+      {children}
+    </span>
   );
 }
 
@@ -209,8 +301,8 @@ const COMPONENTS: Components = {
   // legible on the blue peer bubble (see ErrorNotice for the same pattern).
   span: ({ className, children, ...rest }) => {
     const cls = Array.isArray(className) ? className.join(" ") : className ?? "";
+    const attrs = rest as Record<string, unknown>;
     if (cls.includes("hooop-file-chip")) {
-      const attrs = rest as Record<string, unknown>;
       const path = typeof attrs["data-mention-path"] === "string" ? attrs["data-mention-path"] : null;
       const rawLine = attrs["data-mention-line"];
       const line = typeof rawLine === "string" ? Number(rawLine) : null;
@@ -219,6 +311,10 @@ const COMPONENTS: Components = {
           {children}
         </FileChip>
       );
+    }
+    if (cls.includes("hooop-peer-chip")) {
+      const handle = typeof attrs["data-mention-handle"] === "string" ? attrs["data-mention-handle"] : null;
+      return <PeerChip mine={attrs["data-mention-mine"] === "1"}>{children}</PeerChip>;
     }
     return <span className={cls || undefined}>{children}</span>;
   },
@@ -233,16 +329,42 @@ export function Markdown({
   source,
   fileChips = false,
   onFileMention,
+  peers,
+  mePeer,
 }: {
   source: string;
   fileChips?: boolean;
   onFileMention?: MentionClickHandler;
+  /** Everyone currently in the session. Only these chip, so "@types/node" and a
+   *  mention of somebody who has left stay as prose. The chip renders `name`;
+   *  `handle` is what the message text actually contains. */
+  peers?: readonly { handle: string; name: string }[];
+  /** The viewer's own handle, so a mention OF them is tinted differently. */
+  mePeer?: string | null;
 }) {
+  // Memoised on the FLATTENED roster, not the array, because it arrives fresh
+  // on every presence heartbeat. Depending on its identity would hand
+  // react-markdown a new plugin list every ~10s, and it remounts the subtree
+  // when that changes — every message in the transcript, re-parsed, several
+  // times a minute. Both fields are in the key: a rename has to re-render.
+  const peerKey = peers?.length ? peers.map((p) => `${p.handle}\u0000${p.name}`).join("\u0001") : "";
+  const rehypePlugins = useMemo(() => {
+    if (!fileChips) return undefined;
+    const map = new Map<string, string>();
+    if (peerKey) {
+      for (const row of peerKey.split("\u0001")) {
+        const [handle, name] = row.split("\u0000");
+        map.set(handle, name);
+      }
+    }
+    return [rehypeMentions(map, mePeer ?? null)];
+  }, [fileChips, peerKey, mePeer]);
+
   return (
     <MentionClickContext.Provider value={onFileMention ?? null}>
       <ReactMarkdown
         remarkPlugins={REMARK_PLUGINS}
-        rehypePlugins={fileChips ? REHYPE_FILE_CHIPS : undefined}
+        rehypePlugins={rehypePlugins}
         components={COMPONENTS}
       >
         {source}

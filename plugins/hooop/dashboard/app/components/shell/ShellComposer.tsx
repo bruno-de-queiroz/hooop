@@ -23,7 +23,8 @@ import { AutocompletePopover } from "./AutocompletePopover";
 // text → send, `!cmd` → runBash, `>msg` → participant chat, and image
 // attachments (button or paste) that ride along on send/chat. Typing broadcasts
 // via presence. A spectate peer gets the read-only note. `/` (start of message)
-// and `#` (anywhere) open the autocomplete popover via useComposerAutocomplete.
+// `#` (a file) and `@` (a peer, anywhere) open the autocomplete popover via
+// useComposerAutocomplete.
 
 // Where a composed line goes. Plain text → the model (`send`); `!cmd` → bash;
 // `>msg` → participant chat; and the client-intercepted control commands,
@@ -545,7 +546,12 @@ export const ShellComposer = memo(function ShellComposer({
         enter to send · shift+enter for newline · ↑↓ history ·{" "}
         <span className={cn(mode === "bash" && "text-fail font-semibold")}>! bash</span> ·{" "}
         <span className={cn(mode === "chat" && "text-wrap font-semibold")}>&gt; chat</span> ·{" "}
-        <span className={cn(autocomplete.open && "text-accent font-semibold")}>/ commands · # files</span>
+        {/* One highlight per affordance, keyed on WHICH trigger is live — a
+          * single span keyed on "something is open" lit the file/command hint
+          * while the user was typing an `@peer`. */}
+        <span className={cn(autocomplete.triggerType === "slash" && "text-accent font-semibold")}>/ commands</span> ·{" "}
+        <span className={cn(autocomplete.triggerType === "file" && "text-accent font-semibold")}># files</span> ·{" "}
+        <span className={cn(autocomplete.triggerType === "peer" && "text-accent font-semibold")}>@ peers</span>
       </p>
     </div>
   );

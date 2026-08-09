@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { deriveHandles } from "@shared/handles";
 
 /**
  * Ephemeral, dashboard-local presence registry for shared sessions: who is
@@ -134,12 +135,14 @@ export function leave(sessionId: string, participantId: string): void {
  * the peer's tab is backgrounded or its heartbeat is stale, but it is NOT
  * gone). The `typing` flag is independently expired at TYPING_TTL_MS so a lost
  * `typing:false` can't leave an indicator stuck for the whole entry TTL. */
-export function listPresence(sessionId: string): Array<PresenceEntry & { away: boolean }> {
+export function listPresence(
+  sessionId: string,
+): Array<PresenceEntry & { away: boolean; handle: string }> {
   const map = state().bySession.get(sessionId);
   if (!map) return [];
   evictStale(map);
   const now = Date.now();
-  return [...map.values()]
+  const rows = [...map.values()]
     .map((e) => ({
       ...e,
       typing: e.typing && e.typingSince > 0 && now - e.typingSince <= TYPING_TTL_MS,
@@ -148,4 +151,10 @@ export function listPresence(sessionId: string): Array<PresenceEntry & { away: b
       away: e.kind === "peer" && (!e.active || now - e.lastSeen > IDLE_MS),
     }))
     .sort((a, b) => a.participantId.localeCompare(b.participantId));
+  // Derived AFTER the sort, never before: deriveHandles disambiguates
+  // collisions positionally, so two participants with the same display name
+  // would swap handles between frames under any unstable order — and an
+  // `@mention` typed against one frame would then resolve to the other person.
+  const handles = deriveHandles(rows.map((r) => r.name));
+  return rows.map((r, i) => ({ ...r, handle: handles[i] }));
 }

@@ -12,6 +12,11 @@ export interface PresenceParticipant {
   /** Tab backgrounded or heartbeat stale — render the avatar dimmed. Never
    * means "left" (that's a durable transcript marker, not a presence state). */
   away?: boolean;
+  /** Slug for `@mention` (see @shared/handles). Derived server-side from the
+   * ordered roster so collisions are disambiguated consistently for everyone;
+   * absent from an older frame, which just means that peer isn't mentionable
+   * yet rather than that the roster is broken. */
+  handle?: string;
 }
 
 const HEARTBEAT_MS = 10_000;
@@ -30,8 +35,14 @@ const TYPING_KEEPALIVE_MS = 3_000;
 export function usePresence(sessionId: string | null): {
   participants: PresenceParticipant[];
   setTyping: (typing: boolean) => void;
+  /** This viewer's own participant id ("host" or "peer:<shareId>"), learned
+   *  from the first heartbeat response. Only the browser's cookie can say which
+   *  peer it is, so the server has to tell us; used to find our own row (and
+   *  therefore our own `@handle`) without matching on a display name. */
+  me: string | null;
 } {
   const [participants, setParticipants] = useState<PresenceParticipant[]>([]);
+  const [me, setMe] = useState<string | null>(null);
   const typingRef = useRef(false);
   const typingKeepaliveRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -72,7 +83,15 @@ export function usePresence(sessionId: string | null): {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId: sid, name: myDisplayName(), typing, active }),
-    }).catch(() => { /* transient */ });
+    })
+      // Only `me` is taken from this response, never the roster — see above.
+      // Identity can't go stale the way a participant list can: it is fixed for
+      // the life of the tab, so a late reply can't overwrite anything fresher.
+      .then((r) => (r.ok ? r.json() : null))
+      .then((b: { me?: string } | null) => {
+        if (typeof b?.me === "string") setMe(b.me);
+      })
+      .catch(() => { /* transient */ });
   }, []);
 
   const stopKeepalive = useCallback(() => {
@@ -150,5 +169,5 @@ export function usePresence(sessionId: string | null): {
     [sessionId, post, stopKeepalive],
   );
 
-  return { participants, setTyping };
+  return { participants, setTyping, me };
 }

@@ -10,6 +10,7 @@ const KIND_TONE: Record<AutocompleteEntry["kind"], NonNullable<ChipProps["tone"]
   builtin: "neutral",
   file: "sdk",
   dir: "direct",
+  peer: "wrap",
 };
 
 export function AutocompletePopover({
