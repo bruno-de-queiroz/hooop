@@ -249,6 +249,48 @@ select.field {
   color: rgb(var(--ink-faint));
   border-radius: 6px;
 }
+/* ---- Session header, sized by its PANE not the window --------------------
+   With the file dock and right rail open, the center pane can fall to ~200px on
+   a wide window. The header's action cluster is `shrink-0`, so what gives is the
+   session name (to zero), then the cwd chip, and then the row spills sideways
+   and paints its Share/fullscreen icons over the pane next door. useSqueezeCollapse
+   reclaims the left rail for this exact reason; this is the other half — dropping
+   the header's own optional parts once the row genuinely cannot fit.
+
+   Viewport breakpoints are the wrong tool: the window is 1600px, the pane is 450.
+   So the header is a query container and its optional parts drop by CONTAINER
+   width. `container-type: inline-size` applies layout/size containment only, not
+   paint, so the header's absolutely-positioned popovers (session switcher, peers
+   roster, ⋯ menu) still render outside it as before.
+
+   `!important` for the same reason the Tailwind `max-md:!hidden` needed it: the
+   unlayered `.chip { display: inline-flex }` above outranks a plain `display:none`
+   from a layered utility. */
+.session-header {
+  container-type: inline-size;
+}
+/* The two thresholds are MEASURED, not guessed, against the worst realistic row
+   (both pills on, live pill, two participants) with ~90px kept for the session
+   name: everything shown needs 865px, and 712px once the pill labels go. Values
+   below carry headroom for the cases that add width (a third participant's "+N"
+   avatar, a peer's "shared by X" chip).
+
+   Order matters. The pill LABELS go first even though they are the loudest text:
+   at 153px they are the most expensive thing in the row, and the least
+   informative once the dormancy chip beside them already reads "burns after 5m".
+   The chips say what and for how long; the pills keep their icon, cue, title and
+   aria-label, so dropping their text costs nothing but width. */
+@container (max-width: 880px) {
+  .hdr-pill-label {
+    display: none !important;
+  }
+}
+/* Then the background context itself: cwd, and the dormancy/burn window. */
+@container (max-width: 720px) {
+  .hdr-optional {
+    display: none !important;
+  }
+}
 .tab {
   color: rgb(var(--ink-faint));
   border-radius: 8px;

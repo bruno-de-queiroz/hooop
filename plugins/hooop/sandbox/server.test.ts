@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 // Mocked (see vi.mock below) — imported here so the bash test can inspect calls.
 import { ingestEventLine } from "./lib/ingestor";
-import { markSessionActive } from "./lib/active-sessions";
+import { markSessionActive, startNewConversation, destroySession, setSessionBurnAfterUse, endSession, getActiveSession } from "./lib/active-sessions";
 
 // ---- mock heavy deps before any import of server.ts ----
 
@@ -40,13 +40,16 @@ vi.mock("./lib/sessions", () => ({
 }));
 
 vi.mock("./lib/active-sessions", () => ({
-  startNewConversation: vi.fn(),
+  startNewConversation: vi.fn(async () => ({ sessionId: "new-sess", meta: {} })),
   startSkillSession: (...a: Parameters<typeof mockStartSkillSession>) => mockStartSkillSession(...a),
   isValidSkillName: (name: string) => /^[A-Za-z0-9][A-Za-z0-9_:/-]{0,127}$/.test(name),
   writeUserTurn: vi.fn(),
   isControllable: vi.fn(() => false),
   endSession: vi.fn(),
-  deleteSession: vi.fn(),
+  // The plain (non-burn) /end path alias-expands before it ends, so a share or
+  // preview minted under a prior id is still reachable. Identity is enough here
+  // — the alias semantics themselves are active-sessions.ts's own tests.
+  expandSessionIds: vi.fn((id: string) => [id]),
   renameSession: vi.fn(),
   // Bash/chat side-channels: a live session in a real, writable cwd so `spawn`
   // works, plus the wake + active-marking hooks (asserted by the bash test).
@@ -59,6 +62,38 @@ vi.mock("./lib/active-sessions", () => ({
   bootActiveSessions: vi.fn(),
   startIdleSweeper: vi.fn(),
   shutdownActiveSessions: vi.fn(),
+  // Full teardown + burn-flag toggle (see server.ts's DELETE/burn-after-use
+  // routes, which now just call through to these).
+  destroySession: vi.fn(async () => ({ deleted: true, workspaceRemoved: true, sharesRevoked: 0, previewsStopped: 0 })),
+  setSessionBurnAfterUse: vi.fn((sessionId: string, burn: boolean) => ({ sessionId, burnAfterUse: burn })),
+}));
+
+// checkParticipant's peer path re-validates a share through lib/shares — real
+// enough logic (capabilityAllows) that it's worth keeping rather than
+// stubbing to a constant, so the burn-after-use capability tests below
+// exercise the actual gate. Records are seeded per-test via mockShareRecords.
+const mockShareRecords = new Map<string, { sessionId: string; capability: "full" | "drive" | "spectate"; peerName: string | null }>();
+
+vi.mock("./lib/shares", () => ({
+  bootShares: vi.fn(),
+  createShare: vi.fn(),
+  revokeShare: vi.fn(),
+  revokeAllShares: vi.fn(),
+  setSharePeerName: vi.fn(),
+  markShareJoined: vi.fn(),
+  listShares: vi.fn(() => []),
+  getShare: vi.fn((shareId: string) => mockShareRecords.get(shareId)),
+  validateShareById: (shareId: string) => {
+    const record = mockShareRecords.get(shareId);
+    if (!record) return { ok: false, reason: "revoked or expired" };
+    return { ok: true, record };
+  },
+  capabilityAllows: (capability: "full" | "drive" | "spectate", action: string) => {
+    if (action === "notify") return true;
+    if (capability === "full") return true;
+    if (capability === "drive") return action === "turn";
+    return false;
+  },
 }));
 
 vi.mock("./lib/skills", () => ({ listSkills: () => [], startSkillsWatcher: vi.fn(), stopSkillsWatcher: vi.fn(), skillsBus: new EventEmitter() }));
@@ -194,6 +229,11 @@ beforeEach(async () => {
   delete process.env.HOOOP_AS_AGENT;
   mockStartSkillSession.mockReset();
   mockStartSkillSession.mockResolvedValue({ sessionId: "sess-default" });
+  (startNewConversation as unknown as ReturnType<typeof vi.fn>).mockClear();
+  (destroySession as unknown as ReturnType<typeof vi.fn>).mockClear();
+  (setSessionBurnAfterUse as unknown as ReturnType<typeof vi.fn>).mockClear();
+  (endSession as unknown as ReturnType<typeof vi.fn>).mockClear();
+  mockShareRecords.clear();
   srv = await startTestServer();
 });
 
@@ -439,5 +479,169 @@ describe("POST /sessions/:id/bash — streaming snapshots", () => {
     );
     const done = await waitForDone();
     expect(done.exit_code).toBe(3);
+  });
+});
+
+// idleTtlMs is this session's own idle-dormancy window: bounded 0..24h so a
+// single conversation can't hold one of the install's three controllable
+// slots forever (see server.ts's comment above the check). burnAfterUse is a
+// plain boolean flag. Both are validated before startNewConversation is ever
+// called.
+describe("POST /sessions — idleTtlMs / burnAfterUse validation", () => {
+  it("accepts idleTtlMs: 0 (never go dormant) and passes it through", async () => {
+    const res = await doRequest(srv.socketPath, "POST", "/sessions", srv.token, JSON.stringify({ idleTtlMs: 0 }));
+    expect(res.status).toBe(200);
+    expect((startNewConversation as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({ idleTtlMs: 0 });
+  });
+
+  it("accepts a valid positive idleTtlMs and passes it through", async () => {
+    const res = await doRequest(srv.socketPath, "POST", "/sessions", srv.token, JSON.stringify({ idleTtlMs: 60_000 }));
+    expect(res.status).toBe(200);
+    expect((startNewConversation as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({ idleTtlMs: 60_000 });
+  });
+
+  it("rejects a negative idleTtlMs", async () => {
+    const res = await doRequest(srv.socketPath, "POST", "/sessions", srv.token, JSON.stringify({ idleTtlMs: -1 }));
+    expect(res.status).toBe(400);
+    expect(startNewConversation as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-integer idleTtlMs", async () => {
+    const res = await doRequest(srv.socketPath, "POST", "/sessions", srv.token, JSON.stringify({ idleTtlMs: 1.5 }));
+    expect(res.status).toBe(400);
+    expect(startNewConversation as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("rejects an idleTtlMs over the 24h cap", async () => {
+    const res = await doRequest(srv.socketPath, "POST", "/sessions", srv.token, JSON.stringify({ idleTtlMs: 86_400_001 }));
+    expect(res.status).toBe(400);
+    expect(startNewConversation as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("rejects a string idleTtlMs", async () => {
+    const res = await doRequest(srv.socketPath, "POST", "/sessions", srv.token, JSON.stringify({ idleTtlMs: "60000" }));
+    expect(res.status).toBe(400);
+    expect(startNewConversation as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-boolean burnAfterUse", async () => {
+    const res = await doRequest(srv.socketPath, "POST", "/sessions", srv.token, JSON.stringify({ burnAfterUse: "yes" }));
+    expect(res.status).toBe(400);
+    expect(startNewConversation as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("accepts a boolean burnAfterUse and passes it through", async () => {
+    const res = await doRequest(srv.socketPath, "POST", "/sessions", srv.token, JSON.stringify({ burnAfterUse: true }));
+    expect(res.status).toBe(200);
+    expect((startNewConversation as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatchObject({ burnAfterUse: true });
+  });
+});
+
+// The burn-after-use route is CANCEL-ONLY, and keeps auto-mode's capability gate
+// for that: host or full-access peer, drive/spectate rejected. Arming is not
+// reachable here — see the `burn: true` test for why that matters.
+describe("POST /sessions/:id/burn-after-use", () => {
+  it("rejects a non-boolean body", async () => {
+    const res = await doRequest(
+      srv.socketPath, "POST", "/sessions/sid-burn-1/burn-after-use", srv.token,
+      JSON.stringify({ burn: "yes" }),
+    );
+    expect(res.status).toBe(400);
+    expect(setSessionBurnAfterUse as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("lets the host cancel it and returns { ok, sessionId, burnAfterUse }", async () => {
+    const res = await doRequest(
+      srv.socketPath, "POST", "/sessions/sid-burn-2/burn-after-use", srv.token,
+      JSON.stringify({ burn: false }),
+    );
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, sessionId: "sid-burn-2", burnAfterUse: false });
+  });
+
+  it("refuses to ARM burn-after-use, even for the host", async () => {
+    // Privilege hole this closes: the capability gate below admits a full-access
+    // PEER (inherited from auto-mode, a reversible toggle). If `burn: true` were
+    // accepted, a co-driver invited to pair on code could schedule the deletion
+    // of the host's transcript, workspace, events and shares on the next idle
+    // timeout — destroying the record of who armed it along with it. Arming
+    // stays where it is auditable and host-only: session creation.
+    const res = await doRequest(
+      srv.socketPath, "POST", "/sessions/sid-burn-5/burn-after-use", srv.token,
+      JSON.stringify({ burn: true }),
+    );
+    expect(res.status).toBe(400);
+    expect(setSessionBurnAfterUse as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("rejects a drive-capability peer", async () => {
+    mockShareRecords.set("share-drive-1", { sessionId: "sid-burn-3", capability: "drive", peerName: "Ada" });
+    const res = await doRequest(
+      srv.socketPath, "POST", "/sessions/sid-burn-3/burn-after-use", srv.token,
+      JSON.stringify({ burn: false }), "peer:share-drive-1",
+    );
+    expect(res.status).toBe(403);
+    expect(setSessionBurnAfterUse as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  // NB this one passes on the STRENGTH OF checkParticipant, not the route's own
+  // capability line: spectate never satisfies the "turn" requirement, so it is
+  // rejected before the `capabilityAllows(..., "permission")` check is reached.
+  // Kept as end-to-end documentation of who gets in; the drive-capability test
+  // above is the real pin on the route's extra gate (verified by mutation: only
+  // that one fails when the gate is deleted).
+  it("rejects a spectate-capability peer", async () => {
+    mockShareRecords.set("share-spectate-1", { sessionId: "sid-burn-4", capability: "spectate", peerName: "Bo" });
+    const res = await doRequest(
+      srv.socketPath, "POST", "/sessions/sid-burn-4/burn-after-use", srv.token,
+      JSON.stringify({ burn: false }), "peer:share-spectate-1",
+    );
+    expect(res.status).toBe(403);
+    expect(setSessionBurnAfterUse as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /sessions/:id/end (burn-after-use)", () => {
+  it("hands a burn session's whole teardown to destroySession instead of ending it first", async () => {
+    // Ordering regression: an earlier version ended the session and THEN
+    // destroyed it. endSession clears the slot's alias entries, and `claude
+    // --resume` re-keys a session mid-life, so destroying afterwards could no
+    // longer see a share or preview minted under a prior id — leaving an
+    // aliased share unrevoked and an aliased preview still running. The burn
+    // path must therefore go straight to destroySession, which expands the
+    // aliases itself before the teardown that clears them (and runs endSession
+    // internally via deleteSession, so nothing is skipped).
+    (getActiveSession as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      (id: string) => ({ sessionId: id, cwd: "/tmp", status: "alive", burnAfterUse: true }),
+    );
+    const res = await doRequest(srv.socketPath, "POST", "/sessions/sid-burn-end/end", srv.token);
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true });
+    expect((destroySession as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe("sid-burn-end");
+    // Not called directly by the route — destroySession owns that step now.
+    expect(endSession as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("leaves an ordinary session on the plain end path", async () => {
+    // Default getActiveSession mock reports no burnAfterUse.
+    const res = await doRequest(srv.socketPath, "POST", "/sessions/sid-end-plain/end", srv.token);
+    expect(res.status).toBe(200);
+    expect(endSession as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("sid-end-plain");
+    expect(destroySession as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+});
+
+// The teardown itself (expandSessionIds -> deleteSession -> revoke shares ->
+// reap previews) moved into active-sessions.ts's destroySession so the idle
+// sweeper and this route can't drift apart; the response shape must stay
+// identical to before that move.
+describe("DELETE /sessions/:id", () => {
+  it("returns { ok, deleted, workspaceRemoved, sharesRevoked, previewsStopped } from destroySession", async () => {
+    const res = await doRequest(srv.socketPath, "DELETE", "/sessions/sid-del-1", srv.token);
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      ok: true, deleted: true, workspaceRemoved: true, sharesRevoked: 0, previewsStopped: 0,
+    });
+    expect((destroySession as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe("sid-del-1");
   });
 });

@@ -24,6 +24,12 @@ export interface ActiveSessionMeta {
   pid?: number;
   exitCode?: number | null;
   errorMessage?: string;
+  // Idle-dormancy window set at session creation. null = install default;
+  // 0 = never go dormant; positive = this session's own window, in ms.
+  idleTtlMs?: number | null;
+  // True once this session is armed to self-destruct instead of going
+  // dormant. Set at creation, only ever cancelled afterward.
+  burnAfterUse?: boolean;
 }
 
 export interface Skill {

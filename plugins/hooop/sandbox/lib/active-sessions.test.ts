@@ -14,6 +14,15 @@ vi.mock("./ingestor", () => ({
   ingestEventLine: (line: string) => ingestEventLineMock(line),
 }));
 
+// deleteSession (and so destroySession) purges the search DB on the way out.
+// That module opens a real sqlite file by path — mocked here (no test in this
+// file exercises the DB itself) so destroySession/burn tests never touch a
+// real database, matching how ./previews and ./ingestor are stubbed above.
+vi.mock("./db", () => ({
+  deleteEventsForSessions: vi.fn(() => ({ deleted: 0 })),
+  listEventSessionIds: vi.fn(() => [] as string[]),
+}));
+
 // The preview registry talks to runner containers over a UDS. Mocked so the
 // gate's own behaviour (card vs no card, which decisions are reachable) can be
 // tested without a runner; `previewsMock.records` is the fake registry.
@@ -2533,6 +2542,86 @@ describe("sweepIdleSessions (idle-TTL dormancy)", () => {
     expect(mod.getPendingRequests(sid).some((p) => p.synthetic)).toBe(true);
     expect(mod.isControllable(sid)).toBe(true);
   });
+
+  it("a per-session idleTtlMs SHORTER than the install default reaps earlier", async () => {
+    const shortTtl = 5 * 60 * 1000; // well under the 30-minute default
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", idleTtlMs: shortTtl });
+    const child = shared.children[shared.children.length - 1];
+    const lastSeen = mod.getActiveSession(sessionId)!.lastSeenAt;
+
+    // Under the session's OWN window: not reaped.
+    expect(mod.sweepIdleSessions(lastSeen + shortTtl - 1000)).not.toContain(sessionId);
+    expect(child.kill).not.toHaveBeenCalled();
+
+    // Past it (but still nowhere near the 30-minute install default): reaped.
+    expect(mod.sweepIdleSessions(lastSeen + shortTtl + 1000)).toContain(sessionId);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("a per-session idleTtlMs LONGER than the install default reaps later", async () => {
+    const longTtl = TTL * 3;
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", idleTtlMs: longTtl });
+    const child = shared.children[shared.children.length - 1];
+    const lastSeen = mod.getActiveSession(sessionId)!.lastSeenAt;
+
+    // Past the INSTALL default, but this session's own window is much longer.
+    expect(mod.sweepIdleSessions(lastSeen + TTL + 1000)).not.toContain(sessionId);
+    expect(child.kill).not.toHaveBeenCalled();
+
+    // Past its own (longer) window: reaped.
+    expect(mod.sweepIdleSessions(lastSeen + longTtl + 1000)).toContain(sessionId);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("idleTtlMs: 0 means this session never goes dormant, no matter how idle", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", idleTtlMs: 0 });
+    const child = shared.children[shared.children.length - 1];
+    const lastSeen = mod.getActiveSession(sessionId)!.lastSeenAt;
+
+    expect(mod.sweepIdleSessions(lastSeen + TTL * 1000)).not.toContain(sessionId);
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(mod.getActiveSession(sessionId)?.status).toBe("alive");
+  });
+});
+
+describe("effective idle TTL: a per-session override still works when the install default is disabled", () => {
+  afterEach(() => {
+    delete process.env.HOOOP_SESSION_IDLE_TTL_MS;
+  });
+
+  it("reaps a session on its OWN idleTtlMs even with HOOOP_SESSION_IDLE_TTL_MS=0", async () => {
+    // IDLE_TTL_MS is read once at module load, so disabling the install
+    // default requires a fresh import — mirrors how the "narrowing
+    // HOOOP_CWD_ROOTS" test re-imports for a changed env var.
+    process.env.HOOOP_SESSION_IDLE_TTL_MS = "0";
+    vi.resetModules();
+    shared.reset();
+    fsMock.reset();
+    mod = await import("./active-sessions");
+
+    const shortTtl = 60 * 1000;
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", idleTtlMs: shortTtl });
+    const child = shared.children[shared.children.length - 1];
+    const lastSeen = mod.getActiveSession(sessionId)!.lastSeenAt;
+
+    expect(mod.sweepIdleSessions(lastSeen + shortTtl + 1000)).toContain(sessionId);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("a session with no override still never reaps while the install default is 0", async () => {
+    process.env.HOOOP_SESSION_IDLE_TTL_MS = "0";
+    vi.resetModules();
+    shared.reset();
+    fsMock.reset();
+    mod = await import("./active-sessions");
+
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x" });
+    const child = shared.children[shared.children.length - 1];
+    const lastSeen = mod.getActiveSession(sessionId)!.lastSeenAt;
+
+    expect(mod.sweepIdleSessions(lastSeen + 365 * 24 * 60 * 60 * 1000)).not.toContain(sessionId);
+    expect(child.kill).not.toHaveBeenCalled();
+  });
 });
 
 describe("sweepIdlePreviews (idle sessions release their preview)", () => {
@@ -2624,6 +2713,36 @@ describe("sweepIdlePreviews (idle sessions release their preview)", () => {
     const lastSeen = mod.getActiveSession(sessionId)!.lastSeenAt;
     expect(await mod.sweepIdlePreviews(lastSeen + TTL * 10)).toHaveLength(0);
     expect(mod.getActiveSession(sessionId)?.lastPreviewStoppedReason).toBeUndefined();
+  });
+
+  // sweepIdleSessions and sweepIdlePreviews both claim to go through
+  // effectiveIdleTtl(slot), not the install constant directly (see the shared
+  // comment on effectiveIdleTtl). Only sweepIdleSessions had coverage for a
+  // per-session override; a sweepIdlePreviews call site hard-wired back to
+  // IDLE_TTL_MS would keep every other test in this describe green (they never
+  // set idleTtlMs) while silently no longer respecting a session's own window.
+  it("a per-session idleTtlMs SHORTER than the install default releases the preview EARLY", async () => {
+    const shortTtl = 5 * 60 * 1000; // well under the 30-minute default
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", idleTtlMs: shortTtl });
+    givePreview(sessionId);
+    const lastSeen = mod.getActiveSession(sessionId)!.lastSeenAt;
+
+    // Under the session's OWN window: left alone.
+    expect(await mod.sweepIdlePreviews(lastSeen + shortTtl - 1000)).toHaveLength(0);
+    expect(previewsMock.records).toHaveLength(1);
+
+    // Past it — nowhere near the 30-minute install default: released.
+    expect(await mod.sweepIdlePreviews(lastSeen + shortTtl + 1000)).toContain("pv-idle");
+    expect(previewsMock.records).toHaveLength(0);
+  });
+
+  it("idleTtlMs: 0 means the preview is never released, no matter how idle", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", idleTtlMs: 0 });
+    givePreview(sessionId);
+    const lastSeen = mod.getActiveSession(sessionId)!.lastSeenAt;
+
+    expect(await mod.sweepIdlePreviews(lastSeen + TTL * 1000)).toHaveLength(0);
+    expect(previewsMock.records).toHaveLength(1);
   });
 });
 
@@ -2921,13 +3040,15 @@ describe("wake with no transcript on disk (session created without a Claude turn
 describe("runtime resume-failure recovery (transcript exists but --resume dies)", () => {
   // Set up a dormant session that HAS a transcript on disk, so wakeSession takes
   // the `--resume` path (resumeSpawn=true). Returns the canonical id.
-  async function primeDormantWithTranscript(): Promise<{ id: string; realCwd: string }> {
+  async function primeDormantWithTranscript(
+    opts: { idleTtlMs?: number | null; burnAfterUse?: boolean } = {},
+  ): Promise<{ id: string; realCwd: string }> {
     delete process.env.HOOOP_CWD_ROOTS;
     const fsReal = await import("node:fs");
     const readdir = fsReal.readdirSync as unknown as ReturnType<typeof vi.fn>;
     const realCwd = fsMock.realFs!.mkdtempSync(join(tmpdir(), "resume-fail-"));
 
-    await mod.startNewConversation({ cwd: realCwd });
+    await mod.startNewConversation({ cwd: realCwd, ...opts });
     const child = shared.children[0];
     child.stdout.pushLine({ type: "system", session_id: "resumable-id" });
     await flush();
@@ -3023,6 +3144,57 @@ describe("runtime resume-failure recovery (transcript exists but --resume dies)"
         && e.ctx.last_assistant_message.includes("Couldn't resume"));
     expect(notice).toBeUndefined();
   });
+
+  // recoverWithFreshSession rebuilds the slot under a BRAND-NEW id (spawnControllable
+  // builds fresh meta from scratch), so idleTtlMs/burnAfterUse are not there for free
+  // the way they are on an ordinary field copy — each has to be threaded through
+  // explicitly, same as wakeSession's carry-over (see the "wakeSession carries
+  // idleTtlMs and burnAfterUse" test above). Losing burnAfterUse here would mean a
+  // burn session that hits a corrupt-transcript resume failure silently becomes a
+  // normal, permanent session instead of still self-destructing.
+  //
+  // Built directly off a checkpoint (like the idleTtlMs/burnAfterUse
+  // round-trip tests elsewhere in this file) rather than off
+  // primeDormantWithTranscript: that helper reaches "dormant" via a LIVE clean
+  // exit, which for a burn-flagged session takes the self-destruct branch
+  // instead of ever landing dormant — loadCheckpoint sets status="dormant"
+  // directly, without going through that close-handler burn logic, and
+  // burnRestoredSessions (the thing that WOULD destroy it) is a separate,
+  // explicitly-invoked step this test never calls.
+  it("recoverWithFreshSession carries idleTtlMs and burnAfterUse into the fresh (new-id) slot", async () => {
+    const sid = "resumable-burn";
+    const fsReal = await import("node:fs");
+    const readdir = fsReal.readdirSync as unknown as ReturnType<typeof vi.fn>;
+
+    fsMock.existsReturnValue = (p: string) => p.endsWith("active-sessions.json") || p.endsWith("/projects");
+    fsMock.readFileReturnValue = makeCheckpoint(sid, tmpdir(), { idleTtlMs: 9_000, burnAfterUse: true });
+    readdir.mockReturnValue(["-x"] as any);
+    fsMock.statImpl = (p: string) => {
+      if (p.endsWith(`${sid}.jsonl`)) return { mtimeMs: 1000 };
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    };
+
+    mod.bootActiveSessions();
+    expect(mod.getActiveSession(sid)?.status).toBe("dormant");
+
+    const p = mod.writeUserTurn(sid, "please continue");
+    await flush();
+    expect(shared.children).toHaveLength(1);
+    const resumed = shared.children[0];
+    expect(resumed.spawnArgs).toContain("--resume");
+
+    // Frame-less early exit on the resume spawn — the exact trigger for
+    // recoverWithFreshSession, per the tests above.
+    resumed.emit("close", 1);
+    const res = await p;
+
+    expect(res.sessionId).not.toBe(sid); // genuinely a new id, not the old one
+    const meta = mod.getActiveSession(res.sessionId);
+    expect(meta?.idleTtlMs).toBe(9_000);
+    expect(meta?.burnAfterUse).toBe(true);
+
+    readdir.mockReturnValue([] as any); // matches this describe's own afterEach cleanup
+  });
 });
 
 describe("close handler: lifecycle on subprocess exit", () => {
@@ -3045,6 +3217,272 @@ describe("close handler: lifecycle on subprocess exit", () => {
     shared.children[0].emit("close", 1);
     await flush();
     expect(mod.getActiveSession("real-exit1")?.status).toBe("ended");
+  });
+});
+
+describe("burn-after-use", () => {
+  const TTL = 30 * 60 * 1000; // default HOOOP_SESSION_IDLE_TTL_MS
+
+  it("sweepIdleSessions destroys (not demotes) a burn-after-use session past its TTL", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", burnAfterUse: true });
+    const child = shared.children[shared.children.length - 1];
+    const lastSeen = mod.getActiveSession(sessionId)!.lastSeenAt;
+
+    // destroySession's internal endSession() waits (up to 5s) for the child to
+    // exit gracefully before force-killing it. Mark it already gone — same
+    // trick the "endSession" suite above uses — so the teardown this triggers
+    // resolves on its own instead of stalling the test on a real timer.
+    child.killed = true;
+
+    expect(mod.sweepIdleSessions(lastSeen + TTL + 1000)).toContain(sessionId);
+    await flush();
+
+    // Destroyed outright, not left dormant — there is no "revive this later"
+    // for a burn session, so reapToDormant is never even set for it.
+    expect(mod.getActiveSession(sessionId)).toBeUndefined();
+    expect(mod.isControllable(sessionId)).toBe(false);
+  });
+
+  it("a burn-after-use session's clean exit (code 0) destroys it instead of going dormant", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", burnAfterUse: true });
+    const child = shared.children[shared.children.length - 1];
+    child.killed = true; // see above — lets the teardown skip its graceful-exit wait
+    child.emit("close", 0); // the ordinary between-turns print-mode exit
+    await flush();
+
+    expect(mod.getActiveSession(sessionId)).toBeUndefined();
+  });
+
+  it("a burn-after-use session's abnormal (non-zero) exit is NOT burned — stays 'ended'", async () => {
+    // A crash is exactly the moment a burn session's workspace/transcript are
+    // most worth keeping around to inspect, so it must NOT be destroyed here.
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", burnAfterUse: true });
+    const child = shared.children[shared.children.length - 1];
+    child.emit("close", 1); // never went through the idle sweep — a genuine crash
+    await flush();
+
+    expect(mod.getActiveSession(sessionId)?.status).toBe("ended");
+    expect(mod.getActiveSession(sessionId)).toBeDefined();
+  });
+});
+
+describe("setSessionBurnAfterUse", () => {
+  it("flips the flag, persists it, and echoes a command + Stop pair", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x" });
+    ingestEventLineMock.mockClear();
+
+    const result = mod.setSessionBurnAfterUse(sessionId, true, "host");
+    expect(result.burnAfterUse).toBe(true);
+    expect(mod.getActiveSession(sessionId)?.burnAfterUse).toBe(true);
+
+    const lines = ingestEventLineMock.mock.calls.map((c) => JSON.parse(c[0]));
+    const prompt = lines.find((l) => l.hook === "UserPromptSubmit");
+    const stop = lines.find((l) => l.hook === "Stop");
+    expect(prompt?.ctx.kind).toBe("command");
+    expect(stop?.ctx.last_assistant_message).toMatch(/Burn after use enabled/);
+  });
+
+  it("is a no-op (no transcript echo) when already in the requested state", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", burnAfterUse: true });
+    ingestEventLineMock.mockClear();
+
+    const result = mod.setSessionBurnAfterUse(sessionId, true, "host");
+    expect(result.burnAfterUse).toBe(true);
+    expect(ingestEventLineMock).not.toHaveBeenCalled();
+  });
+
+  it("can be turned back off", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", burnAfterUse: true });
+    ingestEventLineMock.mockClear();
+
+    const result = mod.setSessionBurnAfterUse(sessionId, false, "host");
+    expect(result.burnAfterUse).toBe(false);
+    expect(mod.getActiveSession(sessionId)?.burnAfterUse).toBe(false);
+    const lines = ingestEventLineMock.mock.calls.map((c) => JSON.parse(c[0]));
+    expect(lines.find((l) => l.hook === "Stop")?.ctx.last_assistant_message).toMatch(/Burn after use disabled/);
+  });
+
+  it("throws for an unknown session", () => {
+    expect(() => mod.setSessionBurnAfterUse("nope", true)).toThrow(/unknown session/);
+  });
+});
+
+describe("destroySession", () => {
+  // destroySession's doc comment is explicit that expandSessionIds MUST be
+  // captured BEFORE deleteSession runs, because deleteSession -> endSession
+  // clears the alias map, and a share/preview minted under a session's PRIOR id
+  // (claude --resume re-keys mid-life) still belongs to this conversation. Swap
+  // the two lines and this test fails: expandSessionIds(current-id), taken AFTER
+  // the alias map is gone, no longer resolves the old id, so the old-id share
+  // and preview are silently left behind instead of being cleaned up.
+  it("revokes a share and reaps a preview registered under a PRIOR id (re-keyed session)", async () => {
+    const { sessionId: startId } = await mod.startNewConversation({ cwd: "/x" });
+    const child = shared.children[shared.children.length - 1];
+
+    // Re-key the session twice via the stdout parser's defensive id-swap (the
+    // same mechanism the "swaps again if --resume yields a new id" test above
+    // exercises), so `startId` is now a historical alias of "current-id" and
+    // "old-id" sits in between.
+    child.stdout.pushLine({ type: "system", session_id: "old-id" });
+    await flush();
+    child.stdout.pushLine({ type: "system", session_id: "current-id" });
+    await flush();
+    expect(mod.expandSessionIds("current-id").sort()).toEqual(["current-id", "old-id", startId].sort());
+
+    // A share and a preview minted while the session was still known as "old-id".
+    const share = sharesMod.createShare({ sessionId: "old-id", publicHost: "x.trycloudflare.com" });
+    previewsMock.records.push({
+      previewId: "pv-old-id", sessionId: "old-id", slot: 1, slotPort: 7850,
+      spec: { name: "web", run: "npm run dev" }, state: "running",
+      phase: { kind: "run" }, failedStep: null, failureReason: null, publicUrl: null,
+    });
+
+    child.killed = true; // skip the graceful-exit wait — not what this test is about
+    const result = await mod.destroySession("current-id");
+
+    expect(result.sharesRevoked).toBe(1);
+    expect(result.previewsStopped).toBe(1);
+    expect(sharesMod.getShare(share.shareId)).toBeFalsy();
+    expect(previewsMock.reaped).toContain("pv-old-id");
+    expect(previewsMock.records.find((r) => r.previewId === "pv-old-id")).toBeUndefined();
+  });
+
+  // The re-entrancy guard (slot.destroying, set before anything else runs) is
+  // what stops deleteSession -> endSession's child-close from looping a
+  // burn-after-use teardown back into destroySession forever, and stops two
+  // racing callers from tearing the same session down twice. Keep the child
+  // "alive" (not killed) so endSession's graceful-exit wait holds the slot open
+  // long enough for a second, concurrent call to actually race the first.
+  it("a second concurrent destroySession() call on the same id no-ops instead of tearing down twice", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x" });
+    const child = shared.children[shared.children.length - 1];
+    const share = sharesMod.createShare({ sessionId, publicHost: "x.trycloudflare.com" });
+    previewsMock.records.push({
+      previewId: "pv-reentrant", sessionId, slot: 1, slotPort: 7850,
+      spec: { name: "web", run: "npm run dev" }, state: "running",
+      phase: { kind: "run" }, failedStep: null, failureReason: null, publicUrl: null,
+    });
+
+    const first = mod.destroySession(sessionId);
+    const second = await mod.destroySession(sessionId);
+
+    // The guard's exact no-op shape. Not merely "nothing left to revoke" — the
+    // share and preview above are still live at this point, waiting for the
+    // FIRST call to claim them once it actually runs its teardown.
+    expect(second).toEqual({ deleted: false, workspaceRemoved: false, sharesRevoked: 0, previewsStopped: 0 });
+
+    // Let the real teardown (still in flight on `first`) finish.
+    child.emit("close", 0);
+    const result = await first;
+
+    expect(result.sharesRevoked).toBe(1);
+    expect(result.previewsStopped).toBe(1);
+    expect(sharesMod.getShare(share.shareId)).toBeFalsy();
+    await flush();
+  });
+});
+
+describe("slot.destroying guards (mid burn-after-use teardown)", () => {
+  it("writeUserTurn refuses a session mid-teardown instead of writing into a closing stdin", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x" });
+    const child = shared.children[shared.children.length - 1];
+    // Don't mark killed — destroySession's own graceful-exit wait keeps the
+    // slot (and slot.destroying) around long enough to observe the guard.
+    const destroyPromise = mod.destroySession(sessionId);
+
+    await expect(mod.writeUserTurn(sessionId, "hello")).rejects.toThrow(/being deleted/);
+
+    child.emit("close", 0);
+    await destroyPromise;
+    await flush();
+  });
+
+  it("setSessionBurnAfterUse refuses to 'cancel' a burn whose teardown already started", async () => {
+    // The cancel path is the one place a false success is worse than an error:
+    // the host clicks ✕ during the seconds a teardown takes, and without this
+    // guard got a 200 plus a "🔥 Burn after use disabled." transcript line while
+    // the workspace, transcript, events and shares were deleted anyway. Being
+    // told you saved the data beats losing it only if it is true.
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", burnAfterUse: true });
+    const child = shared.children[shared.children.length - 1];
+    const destroyPromise = mod.destroySession(sessionId);
+
+    expect(() => mod.setSessionBurnAfterUse(sessionId, false)).toThrow(/being deleted/);
+    // And the flag it refused to change is still armed, not half-applied.
+    expect(mod.getActiveSession(sessionId)?.burnAfterUse).toBe(true);
+
+    child.emit("close", 0);
+    await destroyPromise;
+    await flush();
+  });
+
+  it("markSessionActive no-ops on a session mid-teardown (does not resurrect it)", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x" });
+    const child = shared.children[shared.children.length - 1];
+    const lastSeenBefore = mod.getActiveSession(sessionId)!.lastSeenAt;
+
+    const destroyPromise = mod.destroySession(sessionId);
+    const events: any[] = [];
+    mod.activeSessionsBus.on("change", (p) => events.push(p));
+
+    await new Promise((r) => setTimeout(r, 5)); // let the clock move
+    mod.markSessionActive(sessionId);
+
+    // No-op: lastSeenAt untouched and no "change" broadcast. Without the
+    // destroying guard, markSessionActive always bumps lastSeenAt and emits a
+    // change even for an already-"alive" session (see the markSessionActive
+    // describe block above) — the guard is what stops a side-channel
+    // `!bash`/`>chat` from putting this row back in the dashboard's Active
+    // group on top of a workspace/transcript destroySession is deleting.
+    expect(mod.getActiveSession(sessionId)?.lastSeenAt).toBe(lastSeenBefore);
+    expect(events).toHaveLength(0);
+
+    child.emit("close", 0);
+    await destroyPromise;
+    await flush();
+  });
+});
+
+describe("shutdownActiveSessions vs burn-after-use", () => {
+  it("a burn session whose child closes during a shutdown drain lands on dormant, not destroyed", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", burnAfterUse: true });
+    const child = shared.children[shared.children.length - 1];
+
+    const shutdown = mod.shutdownActiveSessions();
+    // The drain's own kill produces a close that looks EXACTLY like the
+    // ordinary idle/clean exit a burn session is supposed to self-destruct on
+    // — _draining is what tells the close handler these are different, so it
+    // must land on "dormant" here instead of racing process.exit with an
+    // async teardown that would strand a half-deleted session.
+    child.emit("close", 0);
+    await shutdown;
+    await flush();
+
+    expect(mod.getActiveSession(sessionId)?.status).toBe("dormant");
+    expect(mod.getActiveSession(sessionId)?.burnAfterUse).toBe(true);
+  });
+});
+
+describe("close handler: burn-after-use status ordering", () => {
+  it("emits status='ended' (with the exit code) synchronously, before the async burn teardown starts", async () => {
+    const { sessionId } = await mod.startNewConversation({ cwd: "/x", burnAfterUse: true });
+    const events: any[] = [];
+    mod.activeSessionsBus.on("change", (p) => events.push(p));
+    const child = shared.children[shared.children.length - 1];
+    child.killed = true; // skip destroySession's own graceful-exit wait/timer
+
+    child.emit("close", 0);
+
+    // A clean (code 0) exit on a burn session is exactly the case the ordering
+    // fix targets. An "ended" change event carrying this exit code can only come
+    // from the close handler's OWN write, made before it kicks off destroySession
+    // — a regression that goes back to returning early without it would either
+    // never fire this event or fire a stale "alive" one instead.
+    const endedEvent = events.find((e) => e.sessionId === sessionId && e.status === "ended");
+    expect(endedEvent).toBeDefined();
+    expect(endedEvent.exitCode).toBe(0);
+
+    await flush();
   });
 });
 
@@ -3321,6 +3759,109 @@ describe("dormant session revival: cwd policy re-application", () => {
     expect(meta.lastStats?.model).toBe("claude-sonnet-4-6");
   });
 
+  it("idleTtlMs and burnAfterUse survive a checkpoint save/restore round-trip", async () => {
+    const sessionCwd = join(tmpAllowedRoot, "project");
+    fsMock.realFs!.mkdirSync(sessionCwd, { recursive: true });
+
+    const payload = makeCheckpoint("dormant-burn-idle", sessionCwd, {
+      idleTtlMs: 12345,
+      burnAfterUse: true,
+    });
+    fsMock.existsReturnValue = (p: string) => p.endsWith("active-sessions.json");
+    fsMock.readFileReturnValue = payload;
+    process.env.HOOOP_CWD_ROOTS = tmpAllowedRoot;
+
+    mod.bootActiveSessions();
+
+    const dormant = mod.getActiveSession("dormant-burn-idle");
+    expect(dormant?.status).toBe("dormant");
+    expect(dormant?.idleTtlMs).toBe(12345);
+    expect(dormant?.burnAfterUse).toBe(true);
+  });
+
+  it("a checkpoint entry with idleTtlMs: 0 restores as 0, not the install default", async () => {
+    // 0 is a meaningful, distinct value from "absent" — a naive `entry.idleTtlMs
+    // || ...` restore would silently turn it into undefined.
+    const sessionCwd = join(tmpAllowedRoot, "project");
+    fsMock.realFs!.mkdirSync(sessionCwd, { recursive: true });
+
+    const payload = makeCheckpoint("dormant-idle-zero", sessionCwd, { idleTtlMs: 0 });
+    fsMock.existsReturnValue = (p: string) => p.endsWith("active-sessions.json");
+    fsMock.readFileReturnValue = payload;
+    process.env.HOOOP_CWD_ROOTS = tmpAllowedRoot;
+
+    mod.bootActiveSessions();
+
+    expect(mod.getActiveSession("dormant-idle-zero")?.idleTtlMs).toBe(0);
+  });
+
+  it("wakeSession carries idleTtlMs and burnAfterUse into the revived alive slot", async () => {
+    // Mirrors the lastStats carry-over test above, for the two new settings —
+    // a woken slot builds fresh meta, so without carry-over both would
+    // silently revert (idleTtlMs to the install default, burnAfterUse to off).
+    const sessionCwd = join(tmpAllowedRoot, "project");
+    fsMock.realFs!.mkdirSync(sessionCwd, { recursive: true });
+
+    const payload = makeCheckpoint("dormant-wake-burn", sessionCwd, {
+      idleTtlMs: 7000,
+      burnAfterUse: true,
+    });
+    fsMock.existsReturnValue = (p: string) => p.endsWith("active-sessions.json");
+    fsMock.readFileReturnValue = payload;
+    process.env.HOOOP_CWD_ROOTS = tmpAllowedRoot;
+
+    mod.bootActiveSessions();
+    expect(mod.getActiveSession("dormant-wake-burn")?.status).toBe("dormant");
+
+    const meta = await mod.wakeSession("dormant-wake-burn");
+    expect(meta.status).toBe("alive");
+    expect(meta.idleTtlMs).toBe(7000);
+    expect(meta.burnAfterUse).toBe(true);
+  });
+
+  it("burnRestoredSessions destroys a restored burn slot and leaves a normal one alone", async () => {
+    const burnCwd = join(tmpAllowedRoot, "burn-project");
+    const normalCwd = join(tmpAllowedRoot, "normal-project");
+    fsMock.realFs!.mkdirSync(burnCwd, { recursive: true });
+    fsMock.realFs!.mkdirSync(normalCwd, { recursive: true });
+
+    const payload = JSON.stringify({
+      version: 1,
+      savedAt: new Date().toISOString(),
+      sessions: [
+        {
+          sessionId: "restored-burn", runId: null, label: "burn session", displayName: null,
+          cwd: burnCwd, via: "new-conversation",
+          startedAt: Date.now() - 1000, lastSeenAt: Date.now() - 500,
+          burnAfterUse: true,
+        },
+        {
+          sessionId: "restored-normal", runId: null, label: "normal session", displayName: null,
+          cwd: normalCwd, via: "new-conversation",
+          startedAt: Date.now() - 1000, lastSeenAt: Date.now() - 500,
+        },
+      ],
+    });
+    fsMock.existsReturnValue = (p: string) => p.endsWith("active-sessions.json");
+    fsMock.readFileReturnValue = payload;
+    process.env.HOOOP_CWD_ROOTS = tmpAllowedRoot;
+
+    // burnRestoredSessions must NEVER be called from inside bootActiveSessions
+    // itself (see its doc comment) — this call sequence is exactly why: booting
+    // is what every test in this file already does, and only the explicit call
+    // below performs any destruction.
+    mod.bootActiveSessions();
+    expect(mod.getActiveSession("restored-burn")?.burnAfterUse).toBe(true);
+    expect(mod.getActiveSession("restored-normal")).toBeDefined();
+
+    const destroyed = await mod.burnRestoredSessions();
+
+    expect(destroyed).toEqual(["restored-burn"]);
+    expect(mod.getActiveSession("restored-burn")).toBeUndefined();
+    // The untouched session survives, still dormant and resumable.
+    expect(mod.getActiveSession("restored-normal")?.status).toBe("dormant");
+  });
+
   it("narrowing HOOOP_CWD_ROOTS between boot cycles prunes previously-valid sessions", async () => {
     // First cycle: no restriction → session with tmpOtherRoot cwd loads fine.
     const sessionCwd = join(tmpOtherRoot, "project");
@@ -3341,6 +3882,56 @@ describe("dormant session revival: cwd policy re-application", () => {
     mod.bootActiveSessions();
 
     expect(mod.getActiveSession("dormant-narrow")).toBeUndefined();
+  });
+});
+
+// The hand-written-checkpoint test above ("a checkpoint entry with idleTtlMs: 0
+// restores as 0") only exercises loadCheckpoint's restore side. saveCheckpoint's
+// own serialization (`s.meta.idleTtlMs != null ? {...} : {}`) has no coverage
+// driven by a REAL live session — changing that `!= null` to a truthy check
+// would drop idleTtlMs: 0 from the written file entirely (0 is falsy), and every
+// existing test would stay green because none of them set idleTtlMs: 0 on a
+// session that actually goes through a real save. That bug means "never go
+// dormant" silently reverts to the install default on the next real restart.
+describe("saveCheckpoint (real session round-trip)", () => {
+  it("idleTtlMs: 0 on a live session survives an actual saveCheckpoint call, and the reload", async () => {
+    // A real, existing directory: the reload half re-applies cwd policy
+    // (realpathSync), which fails closed on a made-up path like "/x" that
+    // other tests get away with only because they never reload the checkpoint.
+    const real = fsMock.realFs!;
+    const cwd = real.mkdtempSync(join(tmpdir(), "checkpoint-idle-zero-"));
+    try {
+      const { sessionId } = await mod.startNewConversation({ cwd, idleTtlMs: 0 });
+
+      const fsReal = await import("node:fs");
+      const writeFileSync = fsReal.writeFileSync as unknown as ReturnType<typeof vi.fn>;
+      writeFileSync.mockClear();
+      // renameSession is a cheap way to force a FRESH saveCheckpoint (same trick
+      // the plan-review persistence tests use below), so this exercises the real
+      // serialization path rather than a hand-written checkpoint fixture.
+      mod.renameSession(sessionId, "still idle-exempt");
+
+      const call = [...writeFileSync.mock.calls].reverse()
+        .find((c) => String(c[0]).endsWith("active-sessions.json.tmp"));
+      expect(call).toBeDefined();
+      const body = JSON.parse(String(call![1]));
+      const entry = body.sessions.find((s: any) => s.sessionId === sessionId);
+      // A truthy check on idleTtlMs would omit the field for 0 entirely.
+      expect(entry.idleTtlMs).toBe(0);
+
+      // Round-trip: feed the just-written checkpoint back through loadCheckpoint
+      // on a fresh boot and confirm 0 (not the install default) comes back.
+      fsMock.existsReturnValue = (p: string) => p.endsWith("active-sessions.json");
+      fsMock.readFileReturnValue = JSON.stringify(body);
+      vi.resetModules();
+      shared.reset();
+      mod = await import("./active-sessions");
+      mod.bootActiveSessions();
+
+      expect(mod.getActiveSession(sessionId)?.idleTtlMs).toBe(0);
+    } finally {
+      real.rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });
 

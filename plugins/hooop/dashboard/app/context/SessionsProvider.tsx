@@ -33,7 +33,16 @@ export interface SessionsValue {
    * into `sessions` yet at the moment `createSession` resolves.)
    * Throws on policy / cap errors so callers can surface them inline.
    */
-  createSession: (opts: { name?: string; model?: string; gitRepo?: string }) => Promise<{ sessionId: string }>;
+  createSession: (opts: {
+    name?: string;
+    model?: string;
+    gitRepo?: string;
+    /** Per-session idle-dormancy window. null = install default, 0 = never
+     * go dormant, positive = this session's own window in ms. */
+    idleTtlMs?: number | null;
+    /** Arm burn-after-use at creation; can only be cancelled later. */
+    burnAfterUse?: boolean;
+  }) => Promise<{ sessionId: string }>;
   /**
    * PATCHes a new name onto the session. Optimistic local update; if
    * the server rejects, the optimistic value is rolled back and the
@@ -311,11 +320,23 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
   );
 
   const createSession = useCallback(
-    async (opts: { name?: string; model?: string; gitRepo?: string }): Promise<{ sessionId: string }> => {
+    async (opts: {
+      name?: string;
+      model?: string;
+      gitRepo?: string;
+      idleTtlMs?: number | null;
+      burnAfterUse?: boolean;
+    }): Promise<{ sessionId: string }> => {
       const r = await fetch("/api/sessions/new", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: opts.name, model: opts.model, gitRepo: opts.gitRepo }),
+        body: JSON.stringify({
+          name: opts.name,
+          model: opts.model,
+          gitRepo: opts.gitRepo,
+          idleTtlMs: opts.idleTtlMs,
+          burnAfterUse: opts.burnAfterUse,
+        }),
       });
       if (!r.ok) {
         const body = (await r.json().catch(() => null)) as { error?: string } | null;

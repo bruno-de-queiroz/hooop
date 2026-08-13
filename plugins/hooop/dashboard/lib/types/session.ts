@@ -45,6 +45,16 @@ export interface SessionInfo {
   // viewer so the header's "Auto mode" pill shows for all of them, late joiners
   // included (read off this row, not the live event stream).
   autoMode?: boolean;
+  // Idle-dormancy window set at session creation. Broadcast on the row so
+  // every viewer, late joiners included, reads the session's own window (or
+  // the install-wide default when null) from here rather than the live event
+  // stream. null = install default; 0 = never go dormant; positive = ms.
+  idleTtlMs?: number | null;
+  // True once this session is armed to self-destruct instead of going
+  // dormant. Set at creation, only ever cancelled afterward. Broadcast on the
+  // row so every viewer, late joiners included, reads it from here rather
+  // than the live event stream.
+  burnAfterUse?: boolean;
   displayName?: string | null;
   // Historical session_ids this conversation is also known by — populated
   // by the sandbox after `claude --resume` minted a new internal id, or

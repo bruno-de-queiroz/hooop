@@ -42,6 +42,14 @@ export interface SessionInfo {
   // active-session registry so every viewer's header shows the "Auto mode" pill,
   // late joiners included.
   autoMode?: boolean;
+  // Per-session idle-dormancy window and burn-after-use flag, surfaced from the
+  // active-session registry for the same reason autoMode is: every viewer and
+  // late joiner reads lifecycle state off this row rather than the event
+  // stream, so the settings panel and header pills render correctly on load,
+  // not just after a live update. null/absent idleTtlMs means "install
+  // default"; 0 means "never go dormant".
+  idleTtlMs?: number | null;
+  burnAfterUse?: boolean;
   displayName?: string | null;  // user-set name or first-prompt auto-name
   // Historical ids the same conversation has been known by. Populated when
   // `claude --resume` minted a new internal session_id under the hood, or
@@ -247,6 +255,8 @@ export function listSessions(): SessionInfo[] {
         decorated.displayName = active.displayName;
         decorated.turnActive = active.turnActive === true;
         decorated.autoMode = active.autoMode === true;
+        decorated.idleTtlMs = active.idleTtlMs ?? null;
+        decorated.burnAfterUse = active.burnAfterUse === true;
         // The registry's lastSeenAt is the authoritative activity clock for a
         // controllable session: it advances on turn boundaries AND on
         // model-free side-channel activity (`!bash` / `>chat`, via
@@ -321,6 +331,8 @@ export function listSessions(): SessionInfo[] {
       displayName: a.displayName,
       turnActive: a.turnActive === true,
       autoMode: a.autoMode === true,
+      idleTtlMs: a.idleTtlMs ?? null,
+      burnAfterUse: a.burnAfterUse === true,
       ...(al.length > 0 ? { aliases: al } : {}),
       ...(a.lastStats ? { lastStats: a.lastStats } : {}),
     });

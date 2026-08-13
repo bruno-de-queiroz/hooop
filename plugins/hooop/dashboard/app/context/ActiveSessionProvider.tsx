@@ -50,6 +50,9 @@ export interface ActiveSessionValue {
   /** Toggle unattended auto-approval (auto mode). Effective on the next tool
    * ask; no child restart. Host / full-peer only (enforced server-side). */
   setAutoMode: (auto: boolean) => Promise<void>;
+  /** Cancel burn-after-use. It can only ever be armed at creation, so this
+   * always sends `burn: false` — there is no path to enable it from here. */
+  setBurnAfterUse: (burn: boolean) => Promise<void>;
   /**
    * Direct bash execution (the `!cmd` shortcut). Goes through the sandbox's
    * dedicated bash endpoint, not the model. Errors surface via `sendError`
@@ -327,6 +330,28 @@ export function ActiveSessionProvider({ children }: { children: React.ReactNode 
     }
   }, []);
 
+  const setBurnAfterUse = useCallback(async (burn: boolean) => {
+    const sid = sidRef.current;
+    if (!sid) return;
+    setSendError(null);
+    // Like auto mode, this is consumed live sandbox-side — no child restart,
+    // no thinking-indicator reset. The route only ever accepts `burn: false`
+    // in practice (cancel), since arming happens once at creation.
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/burn-after-use`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ burn }),
+      });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => null)) as { error?: string } | null;
+        setSendError(friendlySendError(r.status, body?.error ?? null));
+      }
+    } catch (e) {
+      setSendError((e as { message?: string })?.message ?? "burn-after-use toggle failed");
+    }
+  }, []);
+
   // Synchronous inline error (no network) for client-rejected control commands.
   const reportError = useCallback((message: string) => setSendError(message), []);
 
@@ -402,6 +427,7 @@ export function ActiveSessionProvider({ children }: { children: React.ReactNode 
       stop,
       setModel,
       setAutoMode,
+      setBurnAfterUse,
       runBash,
       rename,
       remove,
@@ -422,6 +448,7 @@ export function ActiveSessionProvider({ children }: { children: React.ReactNode 
       stop,
       setModel,
       setAutoMode,
+      setBurnAfterUse,
       runBash,
       rename,
       remove,

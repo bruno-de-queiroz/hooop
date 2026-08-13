@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Bell, BellOff, Check, ChevronDown, Maximize2, Minimize2, MoreHorizontal, Share2, X, Zap } from "lucide-react";
+import { Bell, BellOff, Check, ChevronDown, Flame, Maximize2, Minimize2, MoreHorizontal, Share2, X, Zap } from "lucide-react";
 import type { SessionInfo } from "@/lib/types/session";
 import type { SessionMeta } from "@/app/context/hooks/useSessionMeta";
 import type { PresenceParticipant } from "@/app/context/hooks/usePresence";
@@ -39,6 +39,63 @@ function lifecycleDot(lc: string | null): { cls: string; title: string } {
   }
 }
 
+// Renders a positive (>= 1 minute) idle window as both a compact chip
+// fragment ("5m", "2h") and a spelled-out tooltip fragment ("5 minutes",
+// "2 hours") from the SAME rounded number, so the chip and its title can
+// never disagree (that used to happen: the chip rounded to minutes/hours
+// while the tooltip separately re-derived whole minutes from raw ms).
+// Sub-minute windows are handled by the caller, not here — see idleTtlChip.
+function idleWindowParts(ms: number): { short: string; long: string } {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return { short: `${minutes}m`, long: `${minutes} minute${minutes === 1 ? "" : "s"}` };
+  const hours = minutes / 60;
+  const short = Number.isInteger(hours) ? String(hours) : hours.toFixed(1);
+  return { short: `${short}h`, long: `${short} hour${short === "1" ? "" : "s"}` };
+}
+
+// The quiet dormancy/burn chip's copy and underlying number. A session that
+// burns doesn't "sleep", so the wording has to track meta.burnAfterUse rather
+// than assuming the idle window always ends in dormancy — otherwise a
+// burn-after-use session with a positive idleTtlMs shows a chip promising
+// a dormant nap right next to a pill saying it deletes itself instead. A burn
+// session with idleTtlMs: 0 never fires from idleness at all (only ending the
+// session or a sandbox restart takes it) — that's still a true, important
+// fact (it says WHEN the data goes), so it gets its own chip rather than
+// being hidden: hiding it left a bare flame icon as the only clue below the
+// `sm` breakpoint, and hover (the pill's title) doesn't exist on touch.
+function idleTtlChip(ms: number, burnAfterUse: boolean): { label: string; title: string } | null {
+  if (ms <= 0) {
+    if (burnAfterUse) {
+      return {
+        label: "burns on end or restart",
+        title: "This session deletes itself when it's ended or the sandbox restarts, never from sitting idle.",
+      };
+    }
+    return { label: "never sleeps", title: "This session never goes dormant on its own." };
+  }
+  // The create form only ever produces the coarse 5m/30m/2h/never granularity,
+  // but the API accepts any ms from 0 to 24h. A sub-minute window (e.g. a
+  // scripted session) gets its own copy instead of rounding down to a bare
+  // "0m" — indistinguishable from the idleTtlMs: 0 ("never") case above,
+  // which means the exact opposite.
+  if (ms < 60_000) {
+    return burnAfterUse
+      ? { label: "burns in under a minute", title: "This session deletes itself in under a minute of inactivity, instead of going dormant." }
+      : { label: "sleeps in under a minute", title: "This session goes dormant in under a minute of inactivity." };
+  }
+  const { short, long } = idleWindowParts(ms);
+  if (burnAfterUse) {
+    return {
+      label: `burns after ${short}`,
+      title: `This session deletes itself after ${long} of inactivity, instead of going dormant.`,
+    };
+  }
+  return {
+    label: `sleeps after ${short}`,
+    title: `This session goes dormant after ${long} of inactivity.`,
+  };
+}
+
 // Mobile-only ⋯ items: on phones the right rail is hidden, so Details/Files
 // open as a full-screen overlay from here. Hidden at lg+ where the rail shows.
 export function ShellSessionHeader({
@@ -74,10 +131,11 @@ export function ShellSessionHeader({
   // Host OR a full-capability peer (co-host) may open the Share dialog to
   // mint/manage links. Defaults to true pre-mount (server renders as host).
   const canShare = mounted ? canAdmitPeers() : true;
-  // Only the host or a full-access peer may turn auto mode off — same capability
-  // that decides tool permissions. Other peers see a static (read-only) pill.
-  const canToggleAuto = mounted ? canDecidePermissions() : true;
-  const { setAutoMode } = useActiveSession();
+  // Only the host or a full-access peer may turn auto mode off, or cancel
+  // burn-after-use — same capability that decides tool permissions. Other
+  // peers see a static (read-only) pill/chip with no ✕.
+  const canManageLifecycle = mounted ? canDecidePermissions() : true;
+  const { setAutoMode, setBurnAfterUse } = useActiveSession();
   // Per-session notification muting. `isMuted` folds in the global mute, so ask
   // for the two separately: the bell needs to distinguish "you muted this one"
   // from "everything is muted elsewhere" to explain itself.
@@ -156,6 +214,7 @@ export function ShellSessionHeader({
   const inactives = sessions.filter(
     (s) => s.sessionId && ["dormant", "ended"].includes(s.lifecycle ?? "alive"),
   );
+  const dormancyChip = meta.idleTtlMs != null ? idleTtlChip(meta.idleTtlMs, !!meta.burnAfterUse) : null;
 
   function commitRename() {
     const name = draft.trim();
@@ -164,7 +223,7 @@ export function ShellSessionHeader({
   }
 
   return (
-    <div className="px-3 sm:px-5 h-14 shrink-0 flex items-center gap-2 sm:gap-3 border-b border-divider">
+    <div className="session-header px-3 sm:px-5 h-14 shrink-0 flex items-center gap-2 sm:gap-3 border-b border-divider">
       {/* Peers get nothing before the presence stack on phones — the session
         * name/switcher are host-oriented chrome that just eats space there.
         * Same "phone" cutoff (< md) as the cwd chip below. */}
@@ -349,14 +408,80 @@ export function ShellSessionHeader({
         // session workdir (SESSIONS_ROOT/<sessionId>/...) that's meaningless
         // (and needlessly revealing) to show verbatim; still available via title.
         <span
-          className="chip font-mono text-[10px] px-2 py-1 text-ink-faint max-md:!hidden ml-1 max-w-[18rem] truncate"
+          className="chip font-mono text-[10px] px-2 py-1 text-ink-faint hdr-optional ml-1 max-w-[18rem] shrink-0 truncate"
           title={meta.cwd}
         >
           {cwdBasename(meta.cwd)}
         </span>
       )}
 
+      {/* Quiet dormancy/burn chip — only shown when this session's idle window
+        * differs from the install default (idleTtlMs is null otherwise, per
+        * the useSessionMeta/SessionInfo contract). Always has something true
+        * to say, including the burn + idleTtlMs: 0 case (see idleTtlChip).
+        * Same muted treatment and phone decluttering as the cwd chip above,
+        * since like the cwd it's background info rather than an active state
+        * to call out. */}
+      {dormancyChip && (
+        // `whitespace-nowrap` is load-bearing, not cosmetic: without it a
+        // squeezed header wrapped "burns after 5m" onto three lines, and since
+        // the row is a fixed h-14 the taller box spilled over the presence
+        // avatars beside it. Chips in a fixed-height row must never wrap.
+        <span
+          className="chip font-mono text-[10px] px-2 py-1 text-ink-faint hdr-optional ml-1 shrink-0 whitespace-nowrap"
+          title={dormancyChip.title}
+        >
+          {dormancyChip.label}
+        </span>
+      )}
+
       <div className="ml-auto shrink-0 flex items-center gap-1 sm:gap-1.5">
+        {meta.burnAfterUse && (
+          // This session self-deletes instead of going dormant. A privileged
+          // viewer gets an inline ✕ to cancel it — the safe direction, so no
+          // confirmation modal — others see a static indicator.
+          //
+          // The rose `--fail` cue, NOT the amber `--live` auto mode wears: this
+          // is the one pill in the header that means "your data is going away",
+          // and it should not read as just another thing that's switched on.
+          // Rose is what the design system already spends on destructive state
+          // (.avatar-fail, .chip-fail), and it matches the flame avatar the
+          // sessions rail gives these rows. The inline color is still required
+          // for the specificity reason below.
+          // `aria-label` here (not just the hover `title`) is load-bearing:
+          // below `sm` the text label is dropped and only the flame icon
+          // shows, and hover doesn't exist on touch, so this is the only
+          // remaining carrier of "burns after use" for those readers.
+          <span
+            className="pill-btn text-[10px] uppercase tracking-wide px-2 sm:px-2.5 py-1.5 inline-flex items-center gap-1"
+            style={{ color: "rgb(var(--fail))" }}
+            title="This session deletes itself (transcript, workspace, events, share links) when it's ended, when the sandbox restarts, or once its idle window elapses, rather than going dormant."
+            aria-label="Burn after use"
+          >
+            <Flame className="w-3 h-3 shrink-0" />
+            {/* Dropped when the HEADER is narrow, not when the window is (see
+              * .hdr-pill-label): a squeezed center pane on a wide window is
+              * exactly the case where this label pushed the row into overflow.
+              * The flame, the rose cue, and the pill's aria-label carry it. */}
+            <span className="hdr-pill-label">Burn after use</span>
+            {canManageLifecycle && (
+              <button
+                type="button"
+                className="ml-0.5 -mr-0.5 rounded hover:bg-elevated p-0.5"
+                // Cancelling is the safe direction (no confirmation modal),
+                // but it's still a one-way door: the API refuses to re-arm
+                // burn once cancelled, so the only way back is a new session.
+                // Both title and aria-label say so, since one is the only
+                // copy a screen reader or touch user ever gets.
+                title="Cancel burn after use. This can't be undone: only a new session can arm burn again."
+                aria-label="Cancel burn after use. This can't be undone: only a new session can arm burn again."
+                onClick={() => void setBurnAfterUse(false)}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </span>
+        )}
         {meta.autoMode && (
           // Unattended auto-approval is on. A privileged viewer gets an inline ✕
           // to turn it off; others see a static indicator (the sandbox refuses
@@ -370,10 +495,12 @@ export function ShellSessionHeader({
             title="Auto mode: routine tools run without asking. git and destructive commands still require approval."
           >
             <Zap className="w-3 h-3 shrink-0" />
-            {/* Label is dropped on narrow (mobile) headers to save width — the
-              * icon + amber cue carry the meaning; text returns at sm+. */}
-            <span className="hidden sm:inline">Auto mode</span>
-            {canToggleAuto && (
+            {/* Label is dropped on a narrow header to save width — the icon +
+              * amber cue carry the meaning. Container-width now, not the `sm`
+              * viewport: the row overflowed on wide windows with a squeezed
+              * pane, which a viewport breakpoint cannot see. */}
+            <span className="hdr-pill-label">Auto mode</span>
+            {canManageLifecycle && (
               <button
                 type="button"
                 className="ml-0.5 -mr-0.5 rounded hover:bg-elevated p-0.5"

@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import { ClipboardList, Moon, Plus, Search, X } from "lucide-react";
+import { ClipboardList, Flame, Moon, Plus, Search, X } from "lucide-react";
 import type { SessionInfo } from "@/lib/types/session";
 import { useSessions } from "@/app/context/SessionsProvider";
 import { useSelectedSession } from "@/app/context/SelectedSessionProvider";
@@ -242,7 +242,23 @@ function Row({
         selected ? "bg-accent/[0.14]" : "hover:bg-elevated",
       )}
     >
-      {dormant ? (
+      {/* A self-deleting session gets the flame AS its avatar, in the rose cue
+        * (.avatar-fail) the design system already uses for destructive state.
+        * It takes precedence over the dormant moon deliberately: a burn session
+        * only ever reads "dormant" in the narrow window after a sandbox restart,
+        * before the next boot destroys it, and "this is about to delete itself"
+        * outranks "this is asleep". The preview line still says `resume ·
+        * dormant`, so that state isn't lost. */}
+      {s.burnAfterUse ? (
+        <Avatar
+          size="md"
+          className="avatar-fail shrink-0"
+          title="Burns after use: deletes itself instead of going dormant"
+          aria-label="burns after use"
+        >
+          <Flame className="w-3.5 h-3.5" />
+        </Avatar>
+      ) : dormant ? (
         <Avatar size="md" className="shrink-0 opacity-70">
           <Moon className="w-3.5 h-3.5" />
         </Avatar>
@@ -269,6 +285,9 @@ function Row({
           {hasPlan && (
             <ClipboardList className="w-3 h-3 shrink-0 text-live" aria-label="plan to review" />
           )}
+          {/* No flame beside the label: it's the row's avatar now (see above),
+            * which reads at a glance down the whole list instead of competing
+            * with the plan indicator and the attention dot for the same strip. */}
           {/* One attention dot: a pulsing dot while a turn is running, else a
             * solid amber dot when the session has unseen messages. */}
           {s.turnActive ? (

@@ -12,6 +12,12 @@ export interface SessionMeta {
   displayName: string | null;
   /** Unattended auto-approval (auto mode) is engaged for this session. */
   autoMode: boolean;
+  /** True once this session is armed to self-destruct instead of going
+   * dormant. Set at creation; can be cancelled later but not enabled later. */
+  burnAfterUse: boolean;
+  /** Idle-dormancy window for this session. null = install-wide default,
+   * 0 = never go dormant, positive = this session's own window, in ms. */
+  idleTtlMs: number | null;
 }
 
 /**
@@ -123,5 +129,7 @@ export function useSessionMeta(
     cwd: session?.cwd ?? null,
     displayName: session?.displayName ?? null,
     autoMode: session?.autoMode === true,
+    burnAfterUse: session?.burnAfterUse === true,
+    idleTtlMs: session?.idleTtlMs ?? null,
   };
 }

@@ -194,6 +194,33 @@ Two deliberate hardening choices:
 - **Ephemeral profile.** The browser profile lives in memory and is never written to disk, so no cookies or logins persist across sessions. To drive a site that needs login, hand the browser tools a `--storage-state` file (see the [`@playwright/mcp` docs](https://github.com/microsoft/playwright-mcp#user-profile)).
 - **No arbitrary-code tool.** `@playwright/mcp`'s `browser_run_code_unsafe` (arbitrary JavaScript, effectively RCE) is denied via Claude's own `permissions.deny`, so the model never even sees it.
 
+## Session lifecycle
+
+A session that goes quiet goes **dormant**: the sandbox kills its `claude` subprocess, and the next turn you send revives it with `claude --resume`. Nothing is lost. The transcript, the model, auto mode, and the working directory all come back. Dormant sessions stay in the sidebar with a moon avatar and a `resume` hint.
+
+The install-wide window is **30 minutes**, tunable with `HOOOP_SESSION_IDLE_TTL_MS`. Setting it to `0` disables idle dormancy for every session that does not set its own window (see below). Going dormant also releases the session's [live preview](#live-previews) so its slot returns to the pool, and after a much longer grace period (4 hours, `HOOOP_SESSION_SHARE_GRACE_MS`) it revokes the session's share links, because revoking is permanent and a lunch break should not cost you a pairing.
+
+**Per-session window.** The "goes dormant after" field on the new-session form overrides the default for one session: 5 minutes, 30 minutes, 2 hours, or never. Pick `never` and that session keeps its subprocess for as long as the sandbox runs. The header shows a quiet `sleeps after 5m` chip whenever a session differs from the install default.
+
+**Burn after use.** Tick the box on the new-session form and the session **deletes itself instead of going dormant**: transcript, private workspace, search-DB events, share links, and any running preview. Use it for a throwaway session you would rather not leave on disk.
+
+|  | what happens |
+|---|---|
+| its idle window elapses | burns |
+| it is ended explicitly (the `POST /sessions/:id/end` API) | burns |
+| the sandbox restarts | burns on the way back up, so the teardown can finish |
+| the agent's process crashes | **kept**, so you can read what went wrong. The next restart takes it |
+
+Deleting a session from the sidebar removes all of the same things for *any* session, burn or not. Burn is about what happens when you walk away and forget.
+
+Three things worth knowing before you use it:
+
+- **It can only be armed when the session is created.** The header's flame pill has an ✕ to cancel a burn, and cancelling is permanent: nothing in the UI or the API can re-arm it, so you would have to start a fresh session.
+- **Peers lose it too.** Burning revokes the session's share links, and there is no session left to re-share.
+- **`never` plus burn is allowed.** That session only burns when you end it or when the sandbox restarts, never from sitting idle.
+
+Burn rows carry a **flame avatar** in the sessions rail so a self-deleting session is obvious from the list.
+
 ## Pairing & plan review
 
 `/hooop:dashboard` can hand a **share link** to a teammate over a `cloudflared` tunnel. They open it, pick a name, and the host admits them. From that point both sides see the same live transcript and can chat (`>` prefix) or co-drive the model, from a laptop or a phone.

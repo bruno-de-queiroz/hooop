@@ -10,6 +10,8 @@ const MAX_GIT_REPO_LEN = 2048;
 const MAX_LABEL_LEN = 200;
 const MAX_NAME_LEN = 200;
 const MAX_MODEL_LEN = 128;
+// 24h, matching the sandbox's own cap on the per-session idle-dormancy window.
+const MAX_IDLE_TTL_MS = 86_400_000;
 
 export async function POST(req: NextRequest) {
   // Host-only: creating a session is not a co-drive action. A peer (any
@@ -17,7 +19,14 @@ export async function POST(req: NextRequest) {
   // never spawn new ones. The sandbox re-checks this independently.
   if (!isHost(req)) return errorResponse("this action is host-only", 403);
 
-  const { body, error } = await parseJsonBody<{ gitRepo?: unknown; label?: unknown; name?: unknown; model?: unknown }>(
+  const { body, error } = await parseJsonBody<{
+    gitRepo?: unknown;
+    label?: unknown;
+    name?: unknown;
+    model?: unknown;
+    idleTtlMs?: unknown;
+    burnAfterUse?: unknown;
+  }>(
     req,
     { maxBytes: 8 * 1024 }
   );
@@ -27,6 +36,33 @@ export async function POST(req: NextRequest) {
   const label = boundedString(body.label, MAX_LABEL_LEN);
   const name = boundedString(body.name, MAX_NAME_LEN);
   const model = boundedString(body.model, MAX_MODEL_LEN);
+
+  // idleTtlMs: undefined/null both leave the sandbox's install-wide default in
+  // place (null is the wire form of "no override" — SessionInfo.idleTtlMs
+  // round-trips it the same way); 0 means "never go dormant"; anything else
+  // must be a finite non-negative integer under the sandbox's own 24h cap.
+  // Reject rather than clamp — a silently-clamped value would misrepresent
+  // what the user asked for.
+  if (
+    body.idleTtlMs !== undefined &&
+    body.idleTtlMs !== null &&
+    (typeof body.idleTtlMs !== "number" ||
+      !Number.isInteger(body.idleTtlMs) ||
+      body.idleTtlMs < 0 ||
+      body.idleTtlMs > MAX_IDLE_TTL_MS)
+  ) {
+    return errorResponse(`idleTtlMs must be an integer between 0 and ${MAX_IDLE_TTL_MS}`, 400);
+  }
+  const idleTtlMs = body.idleTtlMs as number | null | undefined;
+
+  // burnAfterUse is only ever ARMED here (at creation) — the UI has no path to
+  // flip it on later, only /burn-after-use to cancel it. Still typed-checked
+  // rather than coerced so a malformed body fails loudly instead of silently
+  // defaulting to false.
+  if (body.burnAfterUse !== undefined && typeof body.burnAfterUse !== "boolean") {
+    return errorResponse("burnAfterUse must be a boolean", 400);
+  }
+  const burnAfterUse = body.burnAfterUse as boolean | undefined;
 
   try {
     // Folder selection was removed: sessions run in the sandbox workspace, and
@@ -38,6 +74,8 @@ export async function POST(req: NextRequest) {
       name: name ?? undefined,
       model: model ?? undefined,
       via: "new-conversation",
+      idleTtlMs,
+      burnAfterUse,
     }, forwardedParticipant(req));
     return Response.json({ sessionId, meta });
   } catch (e: any) {

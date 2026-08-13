@@ -160,6 +160,20 @@ export interface ActiveSessionMeta {
   // `model`, re-applied on wake — and broadcast via the session row so every
   // viewer's header reflects it. Set only by setSessionAutoMode (host/full-peer).
   autoMode?: boolean;
+  // How long this session may sit idle before it goes dormant, overriding the
+  // install-wide IDLE_TTL_MS default for this session only. `null`/absent means
+  // "use the install default"; a positive number is this session's own window;
+  // `0` means "never" — this session opts out of idle-dormancy entirely. A
+  // durable host choice, persisted like `model`/`autoMode` and re-applied on
+  // wake (see effectiveIdleTtl, consulted by the idle sweeps instead of the
+  // install constant directly).
+  idleTtlMs?: number | null;
+  // When true, this session does not go dormant on going idle — it destroys
+  // itself instead (transcript, workspace, events, shares, previews; see
+  // destroySession). Set only by setSessionBurnAfterUse or at creation;
+  // persisted like `autoMode` so it survives dormant→awake up until the moment
+  // it actually fires.
+  burnAfterUse?: boolean;
   // Ephemeral (NOT persisted): true while a model turn is in flight. Set at
   // writeUserTurn, cleared on the result frame or on child exit. Broadcast via
   // the session row so EVERY connected peer — and late joiners reading
@@ -326,6 +340,15 @@ interface LiveSlot {
   // read as "ended"; this flag forces the close handler to mark the slot
   // "dormant" (idle + resumable) instead. Cleared on consume.
   reapToDormant?: boolean;
+  // Set by destroySession before it does anything else, and never persisted
+  // (it lives on the slot, not on meta — a checkpoint write mid-teardown must
+  // never claim a session is "destroying" after a restart). destroySession's
+  // own path (deleteSession -> endSession) kills the child, whose close
+  // handler would otherwise see meta.burnAfterUse still set and call
+  // destroySession right back — this flag is what breaks that recursion: the
+  // close handler's burn branch is skipped whenever it's already true, and
+  // destroySession itself no-ops (returns a zero result) on re-entry.
+  destroying?: boolean;
   // True when this child was spawned via `claude --resume` (reviving a dormant
   // slot). A resume can fail at runtime even when a transcript exists — a
   // corrupt/partial .jsonl or a claude version that can't read an older
@@ -358,9 +381,15 @@ const PRUNE_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 // waiting for the next stream-json message. So nothing makes an idle session
 // exit on its own — the "close → dormant" transition only ever fired on
 // restart/kill. The sandbox therefore owns idle-dormancy now: a periodic sweep
-// kills the subprocess of any session with no activity for IDLE_TTL_MS, which
-// routes through the normal close handler → "dormant" → revive-on-next-turn via
-// --resume. Tunable via HOOOP_SESSION_IDLE_TTL_MS (0 disables reaping).
+// kills the subprocess of any session with no activity for its effective TTL,
+// which routes through the normal close handler → "dormant" → revive-on-next-turn
+// via --resume.
+//
+// IDLE_TTL_MS is the INSTALL-WIDE DEFAULT only — the value a session falls back
+// to when it has no `meta.idleTtlMs` of its own. Every sweep consults
+// effectiveIdleTtl(slot), never this constant directly. Tunable via
+// HOOOP_SESSION_IDLE_TTL_MS (0 disables reaping BY DEFAULT — a session with its
+// own explicit idleTtlMs still reaps/never-reaps on its own terms).
 const IDLE_TTL_MS = (() => {
   const raw = process.env.HOOOP_SESSION_IDLE_TTL_MS;
   if (raw != null && raw.trim() !== "") {
@@ -371,6 +400,38 @@ const IDLE_TTL_MS = (() => {
 })();
 const IDLE_SWEEP_INTERVAL_MS = 60 * 1000;
 let _idleSweeper: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * The idle-dormancy window that actually governs this slot: its own
+ * `meta.idleTtlMs` when the host set one, otherwise the install-wide default
+ * (IDLE_TTL_MS). `??` (not `||`) is load-bearing — `0` is a real, meaningful
+ * value here ("never go dormant") and must NOT fall through to the default the
+ * way `0 || IDLE_TTL_MS` would silently do.
+ */
+function effectiveIdleTtl(slot: LiveSlot): number {
+  return slot.meta.idleTtlMs ?? IDLE_TTL_MS;
+}
+
+// True from the moment shutdownActiveSessions() starts draining until the
+// process exits. Read by the child close handler to NOT start a burn-after-use
+// teardown on the way down.
+//
+// A drain kills every child, and each of those exits looks exactly like the
+// clean/idle exit that a burn is supposed to fire on (the pre-existing comment
+// in the close handler says as much). Burning there is unsafe in a way burning
+// on idle is not: the drainer resolves on the same close event the teardown
+// starts from, so shutdown races ahead to process.exit(0) while the unlink /
+// workspace rm / event purge / preview stop are still in flight — and endSession
+// has ALREADY dropped the session from the checkpoint by then, so the next boot
+// has no record to retry from. The result is the exact opposite of what the flag
+// promises: a half-deleted session, left behind forever.
+//
+// Skipping it here loses nothing. The slot stays checkpointed as dormant, and
+// burnRestoredSessions() destroys it completely at the next boot, where the
+// teardown can actually run to completion. "A restart burns the session" still
+// holds; it just happens on the way up instead of the way down.
+// Never reset: the only caller is the shutdown path, and the process is exiting.
+let _draining = false;
 
 // How long a session may sit idle before its PEER SHARES are revoked. Much
 // longer than the dormancy TTL on purpose: revocation is permanent (share ids are
@@ -619,11 +680,14 @@ function restoreLastPreviewSpec(raw: unknown): PreviewSpec | null {
  * without wall-clock. Returns the previewIds it released.
  */
 export async function sweepIdlePreviews(now: number = Date.now()): Promise<string[]> {
-  if (IDLE_TTL_MS <= 0) return []; // reaping disabled
   const released: string[] = [];
   for (const slot of [...slots.values()]) {
     if (slot.meta.turnActive) continue;            // a turn in flight is not idle
-    if (now - slot.meta.lastSeenAt < IDLE_TTL_MS) continue;
+    // Per-slot, not the install constant directly — a session can shorten,
+    // lengthen, or (via 0) opt entirely out of its own idle-dormancy window.
+    const ttl = effectiveIdleTtl(slot);
+    if (ttl <= 0) continue;                        // this session opted out
+    if (now - slot.meta.lastSeenAt < ttl) continue;
 
     // Alias-expanded for the same reason the end/delete callers are: `claude
     // --resume` re-keys a session mid-life, and a preview minted under a prior
@@ -670,6 +734,11 @@ export async function sweepIdlePreviews(now: number = Date.now()): Promise<strin
  * Returns the share ids it revoked.
  */
 export function sweepIdleShares(now: number = Date.now()): string[] {
+  // Deliberately NOT effectiveIdleTtl/meta.idleTtlMs — a per-session dormancy
+  // window is about how quickly a session goes quiet-and-resumable, which is
+  // reversible. Revocation is not: it deletes the share id outright, so it must
+  // stay keyed on the single install-wide SHARE_GRACE_MS for every session,
+  // never inherit a short (or zero) per-session override.
   if (SHARE_GRACE_MS <= 0) return []; // disabled
   const revokedAll: string[] = [];
   for (const slot of [...slots.values()]) {
@@ -710,8 +779,8 @@ export function sweepIdleShares(now: number = Date.now()): string[] {
  * unit-testable without wall-clock. Returns the ids it reaped.
  */
 export function sweepIdleSessions(now: number = Date.now()): string[] {
-  if (IDLE_TTL_MS <= 0) return []; // reaping disabled
   const reaped: string[] = [];
+  const burned: string[] = [];
   let demotedDirectly = false;
   for (const slot of slots.values()) {
     if (slot.meta.status !== "alive") continue;   // dormant/ended/expired: nothing to reap
@@ -723,7 +792,38 @@ export function sweepIdleSessions(now: number = Date.now()): string[] {
     // reads the slot rather than the child, and a decision revives the session
     // through writeUserTurn. So the card survives dormancy — which is the whole
     // point of it being durable.
-    if (now - slot.meta.lastSeenAt < IDLE_TTL_MS) continue;
+    const ttl = effectiveIdleTtl(slot);
+    if (ttl <= 0) continue;                        // this session opted out of dormancy
+    if (now - slot.meta.lastSeenAt < ttl) continue;
+    const sid = slot.meta.sessionId;
+    if (slot.meta.burnAfterUse) {
+      // Burn-after-use has no dormant state to land in — it destroys itself
+      // instead of sitting resumable. Do NOT set reapToDormant (that flag
+      // exists solely to force the close handler onto "dormant"); destroy
+      // fire-and-forget instead, the same way startIdleSweeper already
+      // fire-and-forgets the async preview sweep, so one slow teardown
+      // (workspace rm, share revoke, preview stop) can't stall this tick or
+      // the sessions still waiting behind it in this same loop. The re-entrancy
+      // guard on destroySession (slot.destroying) also means the close handler
+      // this triggers won't loop back here.
+      //
+      // Write the lifecycle before firing, for the same reason the close
+      // handler's burn branch does: the teardown takes seconds (endSession
+      // waits on the child), and until it lands this slot would otherwise
+      // still advertise itself as "alive" — a row the dashboard offers to
+      // drive, and a burn the header offers to cancel, for a session already
+      // past saving. setSessionBurnAfterUse and writeUserTurn now refuse on
+      // `destroying`; this is what makes the UI stop inviting it.
+      slot.meta.status = "ended";
+      activeSessionsBus.emit("change", { sessionId: sid, status: "ended" });
+      burned.push(sid);
+      void destroySession(sid).catch((e) =>
+        log.warn("active-sessions", "idle burn-after-use destroy failed", {
+          sessionId: sid, err: String((e as any)?.message ?? e),
+        }),
+      );
+      continue;
+    }
     if (slot.child && !slot.child.killed) {
       // A live subprocess: force the close handler to land on "dormant" (claude
       // exits non-zero on SIGTERM). Keep the slot registered so --resume can
@@ -737,26 +837,38 @@ export function sweepIdleSessions(now: number = Date.now()): string[] {
       // Active group returns it to Dormant now that it's gone quiet.
       slot.meta.status = "dormant";
       demotedDirectly = true;
-      activeSessionsBus.emit("change", { sessionId: slot.meta.sessionId, status: "dormant" });
+      activeSessionsBus.emit("change", { sessionId: sid, status: "dormant" });
     }
-    reaped.push(slot.meta.sessionId);
+    reaped.push(sid);
   }
   if (demotedDirectly) saveCheckpoint();
   if (reaped.length) log.info("active-sessions", "idle-reaped sessions to dormant", { count: reaped.length });
-  return reaped;
+  if (burned.length) log.info("active-sessions", "idle-burned sessions (burn-after-use)", { count: burned.length });
+  // Both are "ids this sweep acted on" — the existing return contract callers
+  // (and this file's tests) rely on; burning is just a different action than
+  // demoting, not a different category of result.
+  return [...reaped, ...burned];
 }
 
 /**
  * Start the periodic idle-TTL sweeper. Called once from server startup (NOT
  * from bootActiveSessions, which fires in unit tests too — the interval is a
- * server-runtime concern). Idempotent; a no-op when reaping is disabled.
+ * server-runtime concern). Idempotent.
  *
  * One interval drives all three sweeps: demote idle sessions, release their
  * previews, and — much later — revoke their shares. Each is independently
  * guarded, so a failure in one still lets the others run.
+ *
+ * Deliberately runs even when the install-wide IDLE_TTL_MS default is 0
+ * (disabled): a session with its own explicit `meta.idleTtlMs` must still
+ * reap on schedule — see effectiveIdleTtl — and disabling the DEFAULT must not
+ * silently disable every session's ability to opt back in. The interval
+ * itself costs nothing to keep running unconditionally: it ticks every 60s
+ * and is unref'd (see below), so each sweep just no-ops per-slot when that
+ * slot's own effective ttl happens to be 0 too.
  */
 export function startIdleSweeper() {
-  if (_idleSweeper || IDLE_TTL_MS <= 0) return;
+  if (_idleSweeper) return; // idempotent
   _idleSweeper = setInterval(() => {
     try { sweepIdleSessions(); } catch (e) {
       log.warn("active-sessions", "idle sweep failed", { err: String((e as any)?.message ?? e) });
@@ -809,8 +921,12 @@ export function markSessionActive(sessionId: string): void {
   // A provisioning (still-cloning) or errored session must never be promoted to
   // "alive" by a side-channel `!bash`/`>chat` — that would flip it drivable
   // before its workspace exists. Expired is terminal. All are no-ops here.
+  // `destroying` joins them: promoting a session back to "alive" while its
+  // burn-after-use teardown runs would put a row the dashboard reads as drivable
+  // on top of a workspace being deleted.
   if (
     !slot ||
+    slot.destroying ||
     slot.meta.status === "expired" ||
     slot.meta.status === "provisioning" ||
     slot.meta.status === "error"
@@ -977,6 +1093,11 @@ export async function startNewConversation(opts: {
   // Skill/command name + args when via === "skill" (see startSkillSession).
   skill?: string | null;
   skillArgs?: string | null;
+  // Per-session idle-dormancy override (null/absent = install default, 0 =
+  // never) and burn-after-use, set once at creation time. See
+  // ActiveSessionMeta.idleTtlMs / .burnAfterUse for the full semantics.
+  idleTtlMs?: number | null;
+  burnAfterUse?: boolean;
 }): Promise<{ sessionId: string; meta: ActiveSessionMeta }> {
   bootActiveSessions();
   const gitRepo = opts.gitRepo?.trim() || null;
@@ -993,6 +1114,12 @@ export async function startNewConversation(opts: {
     label, displayName, model, via, runId,
     skill: opts.skill ?? null,
     skillArgs: opts.skillArgs ?? null,
+    // Threaded through both the explicit-cwd path and the per-session-dir path
+    // below (including the provisioning phase — see NewSessionBase), so a
+    // git-clone session that's still cloning already carries the choice the
+    // host made when the clone finishes and the real slot spawns.
+    idleTtlMs: opts.idleTtlMs ?? null,
+    burnAfterUse: opts.burnAfterUse ?? false,
   };
 
   // An explicit cwd (internal callers / tests / HOOOP_RUN_CWD) bypasses the
@@ -1037,6 +1164,10 @@ interface NewSessionBase {
   runId: string | null;
   skill: string | null;
   skillArgs: string | null;
+  // See ActiveSessionMeta.idleTtlMs / .burnAfterUse. Carried through the
+  // provisioning phase too, so a git-clone session's choice survives the clone.
+  idleTtlMs: number | null;
+  burnAfterUse: boolean;
 }
 
 /**
@@ -1061,6 +1192,8 @@ function registerProvisioningSlot(opts: { sessionId: string; cwd: string } & New
     lastSeenAt: now,
     status: "provisioning",
     model: opts.model,
+    ...(opts.idleTtlMs != null ? { idleTtlMs: opts.idleTtlMs } : {}),
+    ...(opts.burnAfterUse ? { burnAfterUse: true } : {}),
   };
   slots.set(opts.sessionId, {
     meta,
@@ -1195,6 +1328,10 @@ export async function wakeSession(sessionId: string): Promise<ActiveSessionMeta>
   if (slot.meta.status === "expired") {
     throw new Error(`session expired: ${canonicalId}`);
   }
+  // Mid-teardown (see destroySession): resuming a session whose transcript is
+  // being unlinked would spawn a child against a file that is disappearing, and
+  // would resurrect a session the host asked to be destroyed.
+  if (slot.destroying) throw new Error(`session is being deleted: ${canonicalId}`);
 
   // Re-apply cwd policy on revival. The policy may have been tightened since
   // the session was originally created, or the checkpoint file may have been
@@ -1264,6 +1401,11 @@ export async function wakeSession(sessionId: string): Promise<ActiveSessionMeta>
     // Same rationale for auto mode — carry it so a woken session doesn't silently
     // revert to prompting for every tool.
     autoMode: slot.meta.autoMode,
+    // Same rationale again: a fresh spawn builds fresh meta, so without carrying
+    // these a revive would silently fall back to the install-wide idle default
+    // and/or drop the self-destruct choice.
+    idleTtlMs: slot.meta.idleTtlMs,
+    burnAfterUse: slot.meta.burnAfterUse,
     via: "resumed",
     runId: slot.meta.runId,
     skill: slot.meta.skill,
@@ -1451,6 +1593,13 @@ export async function writeUserTurn(
   let slot = getSlot(sessionId);
   if (!slot) throw new Error(`unknown session: ${sessionId}`);
   if (slot.meta.status === "expired") throw new Error(`session expired: ${slot.meta.sessionId}`);
+  // A burn-after-use teardown is in flight (see destroySession). The slot is
+  // still reachable — deleteSession -> endSession takes seconds — but its stdin
+  // is already ended and its transcript, workspace and events are being
+  // deleted. Refuse loudly instead of writing into it: the alternative is a
+  // turn that either dies on a closed pipe or, worse, revives the session via
+  // --resume against a transcript that is being unlinked underneath it.
+  if (slot.destroying) throw new Error(`session is being deleted: ${slot.meta.sessionId}`);
 
   // Lazy revive
   const needsRevive = slot.meta.status !== "alive" || !slot.child || slot.child.killed;
@@ -1698,6 +1847,11 @@ export async function interruptSession(
   bootActiveSessions();
   const slot = getSlot(sessionId);
   if (!slot) throw new Error(`unknown session: ${sessionId}`);
+  // Mid-teardown (see destroySession): the child is already being killed for
+  // good. Stopping it "successfully" here would report a session the caller can
+  // keep using, seconds before it is deleted — and suppressDormantOnce would
+  // send the close handler down its stay-alive branch on the way out.
+  if (slot.destroying) throw new Error(`session is being deleted: ${slot.meta.sessionId}`);
   const child = slot.child;
   if (!child || child.killed) return; // nothing running to stop
   const canonicalSid = slot.meta.sessionId;
@@ -1882,6 +2036,82 @@ export function setSessionAutoMode(
 }
 
 /**
+ * Toggle a session's "burn after use". Mirrors setSessionAutoMode line for
+ * line: the flip itself is instant (no child restart — the sweep and the close
+ * handler are what actually consume the flag, see sweepIdleSessions and the
+ * close handler in spawnControllable), persisted so it survives dormant→awake,
+ * and broadcast via the session row.
+ *
+ * Unlike `model`/`autoMode`, this setting is one-way in effect even though the
+ * FLAG is two-way: once the session actually goes idle with burnAfterUse still
+ * true, it's destroyed — there is no "undo" after that point. This function
+ * only ever flips the flag before that happens.
+ *
+ * Both directions are accepted HERE, but arming is not reachable from the
+ * network: `POST /sessions/:id/burn-after-use` rejects `burn: true` outright,
+ * because that route admits a full-access peer and arming self-destruction on
+ * someone else's session is not a co-driver's call. Burn is armed only at
+ * creation (host-only) — so in practice every caller of this function passes
+ * `false`. The `true` direction exists for tests and for an internal caller that
+ * already holds host authority.
+ */
+export function setSessionBurnAfterUse(
+  sessionId: string,
+  burn: boolean,
+  byAuthor: string | null = null,
+): { sessionId: string; burnAfterUse: boolean } {
+  bootActiveSessions();
+  const slot = getSlot(sessionId);
+  if (!slot) throw new Error(`unknown session: ${sessionId}`);
+  if (slot.meta.status === "expired") throw new Error(`session expired: ${slot.meta.sessionId}`);
+  // Too late to cancel: the teardown is already running (see destroySession).
+  // Without this the cancel path was a lie in the worst possible place — the
+  // host clicks ✕ during the seconds a burn takes, gets a 200, a cheerful
+  // "🔥 Burn after use disabled." in the transcript, and no error anywhere,
+  // while the transcript, workspace, events and shares are deleted regardless.
+  // Fail loudly instead: the one thing worse than losing the data is being told
+  // you saved it. Same guard the other mutators carry (writeUserTurn,
+  // wakeSession, interruptSession).
+  if (slot.destroying) throw new Error(`session is being deleted: ${slot.meta.sessionId}`);
+  const canonicalSid = slot.meta.sessionId;
+  // No-op when the state is already what's asked — see setSessionAutoMode for
+  // why: a redundant set would otherwise inject a duplicate command echo + Stop
+  // into every client's transcript for a toggle that changed nothing.
+  if (!!slot.meta.burnAfterUse === burn) return { sessionId: canonicalSid, burnAfterUse: burn };
+  slot.meta.burnAfterUse = burn;
+  saveCheckpoint();
+  activeSessionsBus.emit("change", { sessionId: canonicalSid, status: slot.meta.status });
+  // Echo the toggle once in the transcript (kind:"command"), mirroring the
+  // `/auto-mode` echo in setSessionAutoMode.
+  try {
+    ingestEventLine(JSON.stringify({
+      ts: new Date().toISOString(),
+      hook: "UserPromptSubmit",
+      ctx: {
+        session_id: canonicalSid,
+        prompt: burn ? "/burn-after-use on" : "/burn-after-use off",
+        author: byAuthor ?? "host",
+        kind: "command",
+      },
+    }));
+  } catch { /* transcript echo is best-effort */ }
+  // Synthesize a Stop so the client's "thinking" indicator clears — the command
+  // echo above is a UserPromptSubmit with no real turn behind it.
+  try {
+    ingestEventLine(JSON.stringify({
+      ts: new Date().toISOString(),
+      hook: "Stop",
+      ctx: {
+        session_id: canonicalSid,
+        last_assistant_message: burn ? "🔥 Burn after use enabled." : "🔥 Burn after use disabled.",
+        author: byAuthor ?? "host",
+      },
+    }));
+  } catch { /* best-effort */ }
+  return { sessionId: canonicalSid, burnAfterUse: burn };
+}
+
+/**
  * Mark a session's turn as finished (`Stop` hook). The Stop hook is claude's
  * authoritative "the turn is over" signal — the same one the dashboard's
  * client-side indicator trusts — and unlike the stream-json `result` frame it
@@ -2040,6 +2270,11 @@ async function recoverWithFreshSession(oldCanonicalId: string): Promise<LiveSlot
     displayName: meta.displayName,
     model: meta.model,
     autoMode: meta.autoMode,
+    // Same carry-over as wakeSession — this IS a revive (just under a new id,
+    // since the old one's transcript is unreadable), so the same settings must
+    // survive it.
+    idleTtlMs: meta.idleTtlMs,
+    burnAfterUse: meta.burnAfterUse,
     via: "resumed",
     runId: meta.runId,
     skill: meta.skill,
@@ -2131,6 +2366,88 @@ export async function deleteSession(sessionId: string): Promise<{ deleted: boole
   // or a symlink target) — see removeSessionWorkspace.
   const workspaceRemoved = cwd ? removeSessionWorkspace(cwd) : false;
   return { deleted: removed || slots.has(canonicalId) === false, workspaceRemoved };
+}
+
+/**
+ * Permanently destroy a session — the single real teardown, combining
+ * everything the `DELETE /sessions/:id` route does by hand (deleteSession +
+ * revokeSharesForSession + dropJoinsForShare + reapPreviewsForSessions) into
+ * one function, so the idle sweeper and the burn-after-use paths can drive the
+ * exact same teardown the route does instead of a partial copy of it.
+ *
+ * Order matters, and mirrors the route exactly: `expandSessionIds` is captured
+ * BEFORE `deleteSession` clears the registry mapping, because a share or
+ * preview minted under a session's PRIOR id (`claude --resume` re-keys a
+ * session mid-life) still belongs to this conversation, and `expandSessionIds`
+ * can no longer resolve those prior ids once the alias map is gone.
+ *
+ * RE-ENTRANCY: destroySession → deleteSession → endSession kills the child,
+ * and — once burn-after-use is wired into the close handler — that handler
+ * would otherwise see `meta.burnAfterUse` still set on a session it just
+ * watched exit cleanly and call destroySession right back on itself, forever.
+ * `slot.destroying` (set here, BEFORE anything else) is what breaks that: a
+ * re-entrant call (from the close handler this call's own kill triggers, or
+ * from a caller racing the sweep) sees the flag already set and returns a
+ * no-op result immediately instead of tearing down twice.
+ */
+export async function destroySession(sessionId: string): Promise<{
+  deleted: boolean;
+  workspaceRemoved: boolean;
+  sharesRevoked: number;
+  previewsStopped: number;
+}> {
+  bootActiveSessions();
+  const slot = getSlot(sessionId);
+  if (slot?.destroying) {
+    return { deleted: false, workspaceRemoved: false, sharesRevoked: 0, previewsStopped: 0 };
+  }
+  if (slot) slot.destroying = true;
+
+  const sessionIds = expandSessionIds(sessionId);
+  const result = await deleteSession(sessionId);
+  const { revoked } = revokeSharesForSession(sessionIds);
+  for (const id of revoked) dropJoinsForShare(id);
+  const previewsReaped = await reapPreviewsForSessions(sessionIds);
+  return { ...result, sharesRevoked: revoked.length, previewsStopped: previewsReaped.length };
+}
+
+/**
+ * Destroy every slot restored from the checkpoint with `meta.burnAfterUse`
+ * set, regardless of the status it came back as. Meant to be called from
+ * server startup right AFTER `bootActiveSessions()` — a sandbox restart
+ * already killed whatever conversation a burn session was having, so there is
+ * no "leave it dormant, it might resume later" for one: reviving it as dormant
+ * would silently undo the burn.
+ *
+ * MUST NOT be called from inside bootActiveSessions() itself: boot runs on
+ * every unit test in this file (and anything else that imports this module),
+ * so destroying real sessions there would mean importing the module could
+ * delete a real workspace directory under test. Keeping this a separate,
+ * explicitly-invoked step is what makes bootActiveSessions safe to call from a
+ * test.
+ *
+ * Skips a "provisioning" slot — its clone is still running in the background,
+ * there is nothing on disk yet to destroy, and provisioning slots aren't even
+ * checkpointed (see registerProvisioningSlot), so in practice this only ever
+ * matters for a slot that survived to a real checkpoint entry.
+ */
+export async function burnRestoredSessions(): Promise<string[]> {
+  const ids: string[] = [];
+  for (const slot of slots.values()) {
+    if (!slot.meta.burnAfterUse) continue;
+    if (slot.meta.status === "provisioning") continue;
+    ids.push(slot.meta.sessionId);
+  }
+  for (const id of ids) {
+    try {
+      await destroySession(id);
+    } catch (e) {
+      log.warn("active-sessions", "burnRestoredSessions: destroy failed", {
+        sessionId: id, err: String((e as any)?.message ?? e),
+      });
+    }
+  }
+  return ids;
 }
 
 /**
@@ -2274,6 +2591,10 @@ export function reconcileOrphanEvents(): { deleted: number; sessions: number } {
  * surfaces them in /api/sessions for resume.
  */
 export async function shutdownActiveSessions(): Promise<void> {
+  // Before any child is touched: every kill below produces a close that a
+  // burn-after-use session would otherwise self-destruct on, mid-drain, racing
+  // process.exit. See _draining.
+  _draining = true;
   const ids = Array.from(slots.keys());
   await Promise.all(ids.map(async (id) => {
     const slot = slots.get(id);
@@ -2341,6 +2662,22 @@ interface SpawnOpts {
    * class of bug the `model` carry-over guards against.
    */
   autoMode?: boolean;
+  /**
+   * Carry the session's per-session idle-dormancy override across a
+   * wake→respawn cycle — same reasoning as `autoMode`: a woken slot builds
+   * fresh meta, so without this a session that shortened/lengthened/disabled
+   * its own idle window would silently fall back to the install-wide default
+   * (IDLE_TTL_MS) on every dormant→awake cycle.
+   */
+  idleTtlMs?: number | null;
+  /**
+   * Carry the session's burn-after-use choice across a wake→respawn cycle.
+   * Without this, a session that opted into self-destruction on going idle
+   * would silently turn back into an ordinary persistent one on revive — e.g.
+   * a resume-failure recovery (recoverWithFreshSession) that rebuilds the slot
+   * under a new id.
+   */
+  burnAfterUse?: boolean;
   via: "new-conversation" | "skill" | "resumed";
   runId: string | null;
   // For a skill-launched session: the skill/command name + args, carried onto
@@ -2542,6 +2879,10 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
     status: "alive",
     model: opts.model ?? null,
     ...(opts.autoMode ? { autoMode: true } : {}),
+    // `!= null` (not truthy) — 0 is a real, meaningful value ("never go
+    // dormant") that a truthy check would silently drop.
+    ...(opts.idleTtlMs != null ? { idleTtlMs: opts.idleTtlMs } : {}),
+    ...(opts.burnAfterUse ? { burnAfterUse: true } : {}),
     pid: child.pid,
     // Carry over cumulative stats from a previous incarnation (set by
     // wakeSession). Without this, every dormant→awake cycle would
@@ -3160,7 +3501,43 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
         // regardless of code (claude exits non-zero on our SIGTERM).
         const reaped = slot.reapToDormant === true;
         slot.reapToDormant = false;
-        const nextStatus: LifecycleStatus = reaped || code === 0 || code === null ? "dormant" : "ended";
+        const wouldGoDormant = reaped || code === 0 || code === null;
+        if (wouldGoDormant && slot.meta.burnAfterUse && !slot.destroying && !_draining) {
+          // Burn-after-use has no dormant state — a clean/idle exit IS this
+          // session's end of life, not a reason to sit resumable. destroySession
+          // sets slot.destroying before it does anything, so the re-entrant
+          // close this triggers (deleteSession -> endSession kills the same
+          // child again — a no-op, it's already exited) sees the flag and
+          // doesn't loop back here.
+          //
+          // Deliberately NOT extended to the abnormal (non-zero, non-reaped)
+          // branch below: a crash is exactly the moment a burn session's
+          // workspace/transcript are most worth keeping around to inspect, so
+          // it lands on "ended" like any other session and is left alone.
+          // Nor to a shutdown drain (_draining), where the teardown would race
+          // process.exit and strand a half-deleted session.
+          //
+          // Write the lifecycle FIRST, even though this branch returns early and
+          // the slot is about to disappear. The teardown is asynchronous, and
+          // endSession waits on a `close` that already fired (its guard is
+          // `!child.killed`, false for a natural exit), so the slot stays
+          // reachable for seconds. Leaving the stale "alive" behind is what let
+          // writeUserTurn take its `status !== "alive"` revive gate as "still
+          // running" and push a turn into stdin that endSession had already
+          // ended: the user's message vanished and every viewer kept a spinner
+          // for a session that was being deleted. "ended" is also the honest
+          // thing to checkpoint if the process dies mid-teardown.
+          slot.meta.status = "ended";
+          saveCheckpoint();
+          activeSessionsBus.emit("change", { sessionId, status: "ended", exitCode: code });
+          void destroySession(sessionId).catch((e) =>
+            log.warn("active-sessions", "burn-after-use destroy failed on close", {
+              sessionId, err: String((e as any)?.message ?? e),
+            }),
+          );
+          return;
+        }
+        const nextStatus: LifecycleStatus = wouldGoDormant ? "dormant" : "ended";
         slot.meta.status = nextStatus;
         saveCheckpoint();
         activeSessionsBus.emit("change", { sessionId, status: nextStatus, exitCode: code });
@@ -3286,6 +3663,14 @@ interface CheckpointFile {
     // Unattended auto-approval (auto mode). A durable host choice, so it survives
     // dormant→awake. Optional; absent on files written before the field existed.
     autoMode?: boolean;
+    // Per-session idle-dormancy override (null/absent → install default; 0 →
+    // never). A durable host choice, so it survives dormant→awake. Optional;
+    // absent on files written before the field existed.
+    idleTtlMs?: number | null;
+    // Burn-after-use. A durable host choice, so it survives dormant→awake (up
+    // until it actually fires). Optional; absent on files written before the
+    // field existed.
+    burnAfterUse?: boolean;
     // Historical ids that have been remapped to this canonical session.
     // Persisting them lets the dashboard's "transcript spans alias swaps"
     // behaviour survive a sandbox restart — without this, the in-memory
@@ -3336,6 +3721,8 @@ function saveCheckpoint() {
           ...(s.meta.skillArgs ? { skillArgs: s.meta.skillArgs } : {}),
           ...(s.meta.model ? { model: s.meta.model } : {}),
           ...(s.meta.autoMode ? { autoMode: true } : {}),
+          ...(s.meta.idleTtlMs != null ? { idleTtlMs: s.meta.idleTtlMs } : {}),
+          ...(s.meta.burnAfterUse ? { burnAfterUse: true } : {}),
           ...(al.length > 0 ? { aliases: al } : {}),
           ...(s.meta.lastStats ? { lastStats: s.meta.lastStats } : {}),
           ...(reviews.length > 0 ? { pendingReviews: reviews } : {}),
@@ -3418,6 +3805,8 @@ function loadCheckpoint() {
       status: "dormant",
       ...(entry.model ? { model: entry.model } : {}),
       ...(entry.autoMode ? { autoMode: true } : {}),
+      ...(entry.idleTtlMs != null ? { idleTtlMs: entry.idleTtlMs } : {}),
+      ...(entry.burnAfterUse ? { burnAfterUse: true } : {}),
       ...(entry.lastStats ? { lastStats: entry.lastStats } : {}),
       // A preview released for idleness is offered back as a one-click restart,
       // so the offer has to outlive the sandbox process too — validated on the

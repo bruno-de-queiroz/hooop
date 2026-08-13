@@ -75,6 +75,15 @@ export interface SandboxClient {
     model?: string | null;
     runId?: string | null;
     via?: "new-conversation" | "skill";
+    // Per-session idle-dormancy window, set once at creation. null = use the
+    // install-wide default; 0 = never go dormant; positive ms = this
+    // session's own window. Sandbox re-validates + clamps independently.
+    idleTtlMs?: number | null;
+    // Arm burn-after-use at creation: instead of going dormant, the session
+    // destroys itself (transcript, workspace, events, share links, previews).
+    // Can only be cancelled later, never enabled later — see
+    // setSessionBurnAfterUse.
+    burnAfterUse?: boolean;
   }, participant?: string): Promise<{ sessionId: string; meta: ActiveSessionMeta }>;
   listSessions(): Promise<SessionInfo[]>;
   writeUserTurn(sessionId: string, text: string, participant?: string, images?: TurnImage[]): Promise<{ sessionId: string }>;
@@ -89,6 +98,10 @@ export interface SandboxClient {
   /** Toggle unattended auto-approval (auto mode). Effective on the next tool ask
    * (no child restart). Host / full-peer only — the sandbox enforces it. */
   setSessionAutoMode(sessionId: string, auto: boolean, participant?: string): Promise<{ ok: boolean; sessionId: string; autoMode: boolean }>;
+  /** Cancel a session's burn-after-use flag. It can only ever be armed at
+   * creation, never enabled later — this endpoint only ever turns it off.
+   * Host / full-peer only; the sandbox enforces it. */
+  setSessionBurnAfterUse(sessionId: string, burn: boolean, participant?: string): Promise<{ ok: boolean; sessionId: string; burnAfterUse: boolean }>;
   /**
    * Direct bash execution in the session's cwd. Bypasses the model and
    * synthesizes a `BashShortcut` event so the transcript still shows it.
@@ -517,6 +530,8 @@ export function createHttpClient(socketPath: string): SandboxClient {
       request("POST", `/sessions/${encodeURIComponent(sessionId)}/model`, { model }, participantOpts(participant)),
     setSessionAutoMode: (sessionId, auto, participant) =>
       request("POST", `/sessions/${encodeURIComponent(sessionId)}/auto-mode`, { auto }, participantOpts(participant)),
+    setSessionBurnAfterUse: (sessionId, burn, participant) =>
+      request("POST", `/sessions/${encodeURIComponent(sessionId)}/burn-after-use`, { burn }, participantOpts(participant)),
     sendChat: (sessionId, text, images, participant) =>
       request("POST", `/sessions/${encodeURIComponent(sessionId)}/chat`, images && images.length ? { text, images } : { text }, participantOpts(participant)),
     runBashShortcut: (sessionId, command, participant) =>

@@ -35,13 +35,15 @@ import {
   markSessionActive,
   isControllable,
   endSession,
-  deleteSession,
   renameSession,
   getActiveSession,
   getPendingRequests,
   interruptSession,
   setSessionModel,
   setSessionAutoMode,
+  setSessionBurnAfterUse,
+  destroySession,
+  burnRestoredSessions,
   respondToPermission,
   createPermissionRequest,
   listPlanReviewComments,
@@ -79,7 +81,6 @@ import {
   createShare,
   revokeShare,
   revokeAllShares,
-  revokeSharesForSession,
   setSharePeerName,
   markShareJoined,
   listShares,
@@ -445,7 +446,7 @@ add("GET", "/sessions", (_req, res) => {
 
 add("POST", "/sessions", async (req, res) => {
   if (!requireHost(req, res)) return;
-  let body: { gitRepo?: unknown; label?: unknown; name?: unknown; model?: unknown };
+  let body: { gitRepo?: unknown; label?: unknown; name?: unknown; model?: unknown; idleTtlMs?: unknown; burnAfterUse?: unknown };
   try { body = await readJson(req, MAX_BYTES_DEFAULT); } catch (e: any) { return err(res, e.status ?? 400, e.message); }
 
   const gitRepo = boundedString(body.gitRepo, 2048);
@@ -470,12 +471,44 @@ add("POST", "/sessions", async (req, res) => {
     return err(res, 400, "model must not start with '-' or contain whitespace");
   }
 
+  // idleTtlMs is this session's own idle-dormancy window in ms: undefined/null
+  // means "use the install-wide default", and 0 means "never go dormant".
+  // A FINITE window is capped at 24h so a unit mix-up (seconds handed in as ms,
+  // or a stray extra digit) is rejected outright instead of quietly parking a
+  // session for a month. The cap is deliberately NOT a slot-starvation defense:
+  // 0 already opts out of dormancy completely, and holding one of the three
+  // controllable slots open indefinitely is the host's call to make.
+  // Number.isInteger already implies finite, so it carries the NaN/Infinity
+  // rejection on its own.
+  let idleTtlMs: number | null | undefined;
+  if (body.idleTtlMs !== undefined && body.idleTtlMs !== null) {
+    if (
+      typeof body.idleTtlMs !== "number" ||
+      !Number.isInteger(body.idleTtlMs) ||
+      body.idleTtlMs < 0 ||
+      body.idleTtlMs > 86_400_000
+    ) {
+      return err(res, 400, "idleTtlMs must be a finite integer between 0 and 86400000 (24h)");
+    }
+    idleTtlMs = body.idleTtlMs;
+  }
+
+  let burnAfterUse: boolean | undefined;
+  if (body.burnAfterUse !== undefined) {
+    if (typeof body.burnAfterUse !== "boolean") {
+      return err(res, 400, "burnAfterUse must be a boolean");
+    }
+    burnAfterUse = body.burnAfterUse;
+  }
+
   try {
     const { sessionId, meta } = await startNewConversation({
       gitRepo: gitRepo ?? undefined,
       label: label ?? undefined,
       name: name ?? undefined,
       model: model ?? undefined,
+      idleTtlMs,
+      burnAfterUse,
       via: "new-conversation",
     });
     json(res, 200, { sessionId, meta });
@@ -500,21 +533,12 @@ add("PATCH", "/sessions/:id", async (req, res, params) => {
 
 add("DELETE", "/sessions/:id", async (_req, res, params) => {
   try {
-    // Capture the conversation's id + any resume aliases BEFORE deletion clears
-    // the registry mapping, so we can revoke every share bound to it (a share
-    // minted under a prior id must die too).
-    const sessionIds = expandSessionIds(params.id);
-    const result = await deleteSession(params.id);
-    // A deleted session must not remain reachable through a share link a peer
-    // still holds — revoke every share bound to it and drop their pending joins.
-    const { revoked } = revokeSharesForSession(sessionIds);
-    for (const id of revoked) dropJoinsForShare(id);
-    // Same reasoning for a preview: the workspace it was serving is gone, so
-    // the process must go and the slot must return to the pool. Alias-expanded
-    // for the same reason the share revoke is — a preview minted under a prior
-    // id still belongs to this conversation.
-    const previewsReaped = await reapPreviewsForSessions(sessionIds);
-    json(res, 200, { ok: true, ...result, sharesRevoked: revoked.length, previewsStopped: previewsReaped.length });
+    // Full teardown (expand aliases -> delete -> revoke shares/joins -> reap
+    // previews) now lives in active-sessions.ts's destroySession, so this route
+    // and the idle sweeper's burn-after-use path can't drift apart. Response
+    // shape is unchanged.
+    const result = await destroySession(params.id);
+    json(res, 200, { ok: true, ...result });
   } catch (e: any) {
     err(res, 500, e?.message ?? "delete failed");
   }
@@ -522,6 +546,21 @@ add("DELETE", "/sessions/:id", async (_req, res, params) => {
 
 add("POST", "/sessions/:id/end", async (_req, res, params) => {
   try {
+    // For a burn session, being ended IS being destroyed — so hand the whole
+    // teardown to destroySession INSTEAD of ending first and destroying after.
+    // Order is the reason: endSession deletes the slot's alias entries, and
+    // `claude --resume` re-keys a session mid-life, so a share or preview minted
+    // under a prior id is only still reachable while those aliases exist.
+    // destroySession expands them itself, before the teardown that clears them;
+    // destroying afterwards would silently leave an aliased share revoked-never
+    // and an aliased preview running. It also runs endSession internally (via
+    // deleteSession) and reaps previews, so nothing below is skipped.
+    // The burn check must read the flag BEFORE any of that, while the slot is
+    // still in the registry.
+    if (getActiveSession(params.id)?.burnAfterUse === true) {
+      await destroySession(params.id);
+      return json(res, 200, { ok: true });
+    }
     const sessionIds = expandSessionIds(params.id);
     await endSession(params.id);
     // Ending the conversation ends its preview. (The IDLE sweeper deliberately
@@ -1072,6 +1111,39 @@ add("POST", "/sessions/:id/auto-mode", async (req, res, params) => {
     json(res, 200, { ok: true, ...result });
   } catch (e: any) {
     err(res, 500, e?.message ?? "auto-mode toggle failed");
+  }
+});
+
+// CANCEL burn-after-use. Deliberately one-way: burn is armed when the session
+// is created (POST /sessions, host-only) and this route can only turn it off.
+//
+// Accepting `burn: true` here would have been a privilege hole. The capability
+// check below is the auto-mode one, which admits a full-access PEER — fine for a
+// reversible convenience toggle, wrong for arming self-destruction on someone
+// else's session. A co-driver invited to pair on code could have set a session
+// to delete its own transcript, workspace, events and shares on the next idle
+// timeout, taking the audit trail of who armed it along with everything else.
+// Every other destructive lifecycle action here (DELETE, /end) is host-only.
+// So: cancelling keeps the auto-mode gate (host or full peer, drive/spectate
+// rejected), and arming is not reachable from this route at all.
+add("POST", "/sessions/:id/burn-after-use", async (req, res, params) => {
+  const canonicalId = getActiveSession(params.id)?.sessionId ?? params.id;
+  const guard = checkParticipant(req, canonicalId, "turn");
+  if (!guard.ok) return err(res, guard.status, guard.reason);
+  if (guard.isPeer && !capabilityAllows(guard.capability ?? "spectate", "permission")) {
+    return err(res, 403, "only the host or a full-access peer can change burn-after-use");
+  }
+  let body: { burn?: unknown };
+  try { body = await readJson(req, MAX_BYTES_DEFAULT); } catch (e: any) { return err(res, e.status ?? 400, e.message); }
+  if (typeof body.burn !== "boolean") return err(res, 400, "missing required field: burn (boolean)");
+  if (body.burn) {
+    return err(res, 400, "burn-after-use can only be armed when the session is created");
+  }
+  try {
+    const result = setSessionBurnAfterUse(params.id, body.burn, guard.author);
+    json(res, 200, { ok: true, ...result });
+  } catch (e: any) {
+    err(res, 500, e?.message ?? "burn-after-use toggle failed");
   }
 });
 
@@ -2396,6 +2468,22 @@ async function main() {
     }
   }
   startIdleSweeper();
+  // A burn-flagged session restored from the checkpoint must not come back as
+  // an ordinary dormant slot — destroy every one of them now, once at startup.
+  // Never called from bootActiveSessions itself: that path also runs inside
+  // the test suite (via listSessions/getActiveSession), and destroying
+  // sessions is not something a test importing the registry should trigger.
+  void burnRestoredSessions()
+    .then((destroyed: string[]) => {
+      if (destroyed.length > 0) {
+        log.info("sandbox", "destroyed burn-after-use sessions restored from checkpoint", {
+          count: destroyed.length,
+        });
+      }
+    })
+    .catch((e: unknown) => {
+      log.warn("sandbox", "burnRestoredSessions failed", { err: String(e) });
+    });
   bootShares();
   startSessionsWatcher();
   startSkillsWatcher();
