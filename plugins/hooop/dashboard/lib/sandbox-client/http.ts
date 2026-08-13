@@ -293,6 +293,9 @@ export interface SandboxClient {
     label?: string | null,
     ttlMs?: number | null,
     participant?: string,
+    /** Wake hint only: the session the host minted this from, so a dormant one is
+     *  running by the time the device arrives. Grants nothing. */
+    sessionId?: string | null,
   ): Promise<{ code: string; expiresAt: number; deviceTtlMs: number }>;
   /** Redeem a code into a device grant. Null when the code is unknown, expired,
    * already used, or minted for a different host — the caller must not tell
@@ -727,11 +730,11 @@ export function createHttpClient(socketPath: string): SandboxClient {
     listPendingJoins: (participant) => request("GET", "/pending-joins", undefined, participantOpts(participant)),
     peerLeave: (sessionId, name, shareId) => request("POST", "/peer-leave", { sessionId, name: name ?? null, shareId: shareId ?? null }),
 
-    createHostEnrollCode: (publicHost, label, ttlMs, participant) =>
+    createHostEnrollCode: (publicHost, label, ttlMs, participant, sessionId) =>
       request(
         "POST",
         "/host-devices/enroll-code",
-        { publicHost, label: label ?? null, ttlMs: ttlMs ?? null },
+        { publicHost, label: label ?? null, ttlMs: ttlMs ?? null, sessionId: sessionId ?? null },
         participantOpts(participant),
       ),
     redeemHostEnrollCode: async (code, publicHost, label) => {

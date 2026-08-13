@@ -13,6 +13,10 @@ interface CodeBody {
   label?: string | null;
   /** Lifetime of the resulting device grant. Sandbox clamps it. */
   ttlMs?: number | null;
+  /** The session the host is looking at while adding this device. A wake hint
+   *  only: a dormant session should be running by the time the device arrives.
+   *  Devices are install-wide and never scoped to a session. */
+  sessionId?: string | null;
 }
 
 /**
@@ -50,6 +54,7 @@ export async function POST(req: Request) {
       body.label ?? null,
       body.ttlMs ?? null,
       forwardedParticipant(req),
+      typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null,
     );
     // Fragment, not a query param: the enrollment URL is a credential while the
     // code is alive, so it must not reach a server log or a Referer header. Same

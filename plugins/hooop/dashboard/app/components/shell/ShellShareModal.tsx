@@ -230,163 +230,178 @@ export function ShellShareModal({
         </IconButton>
       </div>
 
-      {/* Two columns (mockup): form on the left, created link + QR + active
-         shares on the right. Collapses to one column on narrow viewports. */}
-      <div className="p-5 grid gap-6 sm:grid-cols-[1.1fr_0.9fr] items-start overflow-y-auto max-h-[calc(85vh-3.5rem)]">
-        {/* LEFT — the form */}
-        <div className="flex flex-col gap-4 min-w-0 sm:order-1">
-          <p className="text-[12px] leading-relaxed text-ink-mute">
-            {peerMode
-              ? "You can invite others into this session and manage their access. Pick how much the guest can do below."
-              : "hooop exposes the dashboard over a managed public tunnel — no setup on your end. Start it, then create a link. Pick how much the guest can do below."}
-          </p>
-
-          <div>
-            <div className="section-title mb-1.5">{peerMode ? "Public URL" : "Public tunnel"}</div>
-            {peerMode ? (
-              // A peer can't control the tunnel — it's the host's. Show the origin
-              // links will point to (the one the peer is connected through).
-              <div className="flex items-center gap-2 rounded-control bg-sunken border border-divider px-2.5 py-2">
-                <span className="h-2 w-2 shrink-0 rounded-full bg-wrap" />
-                <code className="flex-1 truncate font-mono text-[11px] text-ink-soft" title={publicBaseUrl ?? ""}>
-                  {publicBaseUrl ?? "unavailable"}
-                </code>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2 rounded-control bg-sunken border border-divider px-2.5 py-2">
-                <span
-                  className={cn(
-                    "h-2 w-2 shrink-0 rounded-full",
-                    running ? "bg-wrap" : tunnel.status === "error" ? "bg-fail" : "bg-ink-hush",
-                  )}
-                />
-                {running && tunnel.url ? (
-                  <code className="flex-1 truncate font-mono text-[11px] text-ink-soft" title={tunnel.url}>
-                    {tunnel.url}
-                  </code>
-                ) : (
-                  <span className="flex-1 font-mono text-[11px] text-ink-faint">
-                    {tunnel.status === "starting" || startingTunnel ? "starting tunnel…" : "tunnel is off"}
-                  </span>
+      {/*
+        Three bands, because the dialog answers three questions in order and used
+        to mix them: is the tunnel up, which of MY devices are on it, and who else
+        is in. The tunnel spans the top since both columns depend on it — nothing
+        below works without it — and the two audiences sit side by side underneath,
+        deliberately adjacent so the contrast is legible: on the left, screens that
+        are YOU; on the right, guests who are not.
+      */}
+      <div className="p-5 flex flex-col gap-5 overflow-y-auto max-h-[calc(85vh-3.5rem)]">
+        {/* ── TOP: the tunnel everything else hangs off ─────────────────────── */}
+        <div>
+          <div className="section-title mb-1.5">{peerMode ? "Public URL" : "Public tunnel"}</div>
+          {peerMode ? (
+            // A peer can't control the tunnel — it's the host's. Show the origin
+            // links will point to (the one the peer is connected through).
+            <div className="flex items-center gap-2 rounded-control bg-sunken border border-divider px-2.5 py-2">
+              <span className="h-2 w-2 shrink-0 rounded-full bg-wrap" />
+              <code className="flex-1 truncate font-mono text-[11px] text-ink-soft" title={publicBaseUrl ?? ""}>
+                {publicBaseUrl ?? "unavailable"}
+              </code>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 rounded-control bg-sunken border border-divider px-2.5 py-2">
+              <span
+                className={cn(
+                  "h-2 w-2 shrink-0 rounded-full",
+                  running ? "bg-wrap" : tunnel.status === "error" ? "bg-fail" : "bg-ink-hush",
                 )}
-                {!running && (
-                  <button
-                    type="button"
-                    onClick={startTunnel}
-                    disabled={startingTunnel || tunnel.status === "starting"}
-                    className="pill-btn shrink-0 text-[11px] px-2.5 py-1 disabled:opacity-40"
-                  >
-                    {startingTunnel || tunnel.status === "starting" ? (
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                    ) : (
-                      "start tunnel"
-                    )}
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div className="flex gap-3">
-            <label className="flex-1">
-              <span className="section-title">Suggested name</span>
-              <input
-                type="text"
-                value={peerName}
-                onChange={(e) => setPeerName(e.target.value)}
-                placeholder="optional — guest names themselves"
-                title="The guest picks their own name when joining; this is just a fallback."
-                className="field w-full text-[12px] px-2.5 py-2 mt-1.5"
               />
-            </label>
-            <label className="flex-1">
-              <span className="section-title">Expires</span>
+              {running && tunnel.url ? (
+                <code className="flex-1 truncate font-mono text-[11px] text-ink-soft" title={tunnel.url}>
+                  {tunnel.url}
+                </code>
+              ) : (
+                <span className="flex-1 font-mono text-[11px] text-ink-faint">
+                  {tunnel.status === "starting" || startingTunnel ? "starting tunnel…" : "tunnel is off"}
+                </span>
+              )}
+              {!running && (
+                <button
+                  type="button"
+                  onClick={startTunnel}
+                  disabled={startingTunnel || tunnel.status === "starting"}
+                  className="pill-btn shrink-0 text-[11px] px-2.5 py-1 disabled:opacity-40"
+                >
+                  {startingTunnel || tunnel.status === "starting" ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    "start tunnel"
+                  )}
+                </button>
+              )}
+            </div>
+          )}
+          <p className="mt-1.5 text-[11px] leading-relaxed text-ink-faint">
+            {peerMode
+              ? "You reached this session through the host's tunnel. Links you create point at the same URL."
+              : "hooop exposes the dashboard over a managed public tunnel — nothing to install. Everything below needs it running."}
+          </p>
+        </div>
+
+        {/* ── BELOW: your screens on the left, other people on the right ────── */}
+        <div className={cn("grid gap-6 items-start", !peerMode && "sm:grid-cols-2")}>
+          {/* LEFT — your own devices. Host only: a peer cannot enroll devices
+             (that would hand out host authority from a guest seat) and the routes
+             refuse it regardless, so showing it to them would be a dead end. Their
+             own "continue on another device" affordance lives in the
+             shared-session panel, where it re-uses their existing share instead of
+             creating anything. */}
+          {!peerMode && (
+            <HostDevicesSection publicBaseUrl={publicBaseUrl} enabled={running} sessionId={sessionId} />
+          )}
+
+          {/* RIGHT — peers: the form, then whatever it produced, then who's in. */}
+          <div className="flex flex-col gap-4 min-w-0">
+            <div>
+              <div className="section-title mb-2">Peers{shares.length > 0 ? ` (${shares.length})` : ""}</div>
+              <p className="text-[11px] leading-relaxed text-ink-mute">
+                Invite someone <span className="text-ink-soft">else</span> in as a guest. They pick
+                their own name, you admit them, and their messages are attributed to them.
+              </p>
+            </div>
+
+            <div className="flex gap-3">
+              <label className="flex-1">
+                <span className="section-title">Suggested name</span>
+                <input
+                  type="text"
+                  value={peerName}
+                  onChange={(e) => setPeerName(e.target.value)}
+                  placeholder="optional — guest names themselves"
+                  title="The guest picks their own name when joining; this is just a fallback."
+                  className="field w-full text-[12px] px-2.5 py-2 mt-1.5"
+                />
+              </label>
+              <label className="flex-1">
+                <span className="section-title">Expires</span>
+                <select
+                  value={String(expiryMs)}
+                  onChange={(e) => setExpiryMs(e.target.value === "null" ? null : Number(e.target.value))}
+                  className="field w-full text-[12px] px-2.5 py-2 mt-1.5"
+                >
+                  {EXPIRY_OPTIONS.map((o) => (
+                    <option key={o.label} value={String(o.ms)}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <label className="block">
+              <span className="section-title">Capability</span>
               <select
-                value={String(expiryMs)}
-                onChange={(e) => setExpiryMs(e.target.value === "null" ? null : Number(e.target.value))}
+                value={capability}
+                onChange={(e) => setCapability(e.target.value as Capability)}
                 className="field w-full text-[12px] px-2.5 py-2 mt-1.5"
               >
-                {EXPIRY_OPTIONS.map((o) => (
-                  <option key={o.label} value={String(o.ms)}>
+                {CAPABILITY_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
                     {o.label}
                   </option>
                 ))}
               </select>
+              <p className="mt-1 text-[11px] text-ink-faint">
+                {CAPABILITY_OPTIONS.find((o) => o.value === capability)?.hint}
+              </p>
             </label>
-          </div>
 
-          <label className="block">
-            <span className="section-title">Capability</span>
-            <select
-              value={capability}
-              onChange={(e) => setCapability(e.target.value as Capability)}
-              className="field w-full text-[12px] px-2.5 py-2 mt-1.5"
+            <button
+              onClick={create}
+              disabled={creating || !canCreate}
+              className="accent-btn w-full py-2.5 text-[12px] font-semibold disabled:opacity-40"
             >
-              {CAPABILITY_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            <p className="mt-1 text-[11px] text-ink-faint">
-              {CAPABILITY_OPTIONS.find((o) => o.value === capability)?.hint}
-            </p>
-          </label>
+              {creating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
+              Create share link
+            </button>
 
-          <button
-            onClick={create}
-            disabled={creating || !canCreate}
-            className="accent-btn w-full py-2.5 text-[12px] font-semibold disabled:opacity-40"
-          >
-            {creating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
-            Create share link
-          </button>
+            {error && <p className="text-[11px] text-fail">{error}</p>}
 
-          {error && <p className="text-[11px] text-fail">{error}</p>}
-        </div>
-
-        {/* RIGHT — created link + QR, then active shares */}
-        <div className="flex flex-col gap-4 min-w-0 sm:order-2">
-          {created ? (
-            <div className="rounded-card border border-wrap/30 bg-wrap/[0.08] p-3">
-              <div className="section-title mb-1.5 text-wrap">Share link (copy &amp; send)</div>
-              <div className="flex items-center gap-2">
-                <code
-                  className="flex-1 truncate rounded bg-sunken px-2 py-1 font-mono text-[11px] text-ink-soft"
-                  title={created.link}
-                >
-                  {created.link}
-                </code>
-                <button
-                  onClick={copyLink}
-                  className="icon-btn w-8 h-8 shrink-0"
-                  aria-label="Copy link"
-                  title="Copy link"
-                >
-                  <Copy className="w-3.5 h-3.5" />
-                </button>
-              </div>
-              {copied && <p className="mt-1 text-[10px] text-wrap">copied</p>}
-              {/* QR encodes the full link (token in the fragment), rendered locally
-                 so the token never leaves the page. */}
-              <div className="mt-3 flex flex-col items-center gap-1">
-                <div className="rounded-lg bg-white p-2">
-                  <QRCodeSVG value={created.link} size={148} level="M" />
+            {created && (
+              <div className="rounded-card border border-wrap/30 bg-wrap/[0.08] p-3">
+                <div className="section-title mb-1.5 text-wrap">Share link (copy &amp; send)</div>
+                <div className="flex items-center gap-2">
+                  <code
+                    className="flex-1 truncate rounded bg-sunken px-2 py-1 font-mono text-[11px] text-ink-soft"
+                    title={created.link}
+                  >
+                    {created.link}
+                  </code>
+                  <button
+                    onClick={copyLink}
+                    className="icon-btn w-8 h-8 shrink-0"
+                    aria-label="Copy link"
+                    title="Copy link"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                  </button>
                 </div>
-                <p className="text-[10px] text-ink-faint">scan to join on another device</p>
+                {copied && <p className="mt-1 text-[10px] text-wrap">copied</p>}
+                {/* QR encodes the full link (token in the fragment), rendered locally
+                   so the token never leaves the page. */}
+                <div className="mt-3 flex flex-col items-center gap-1">
+                  <div className="rounded-lg bg-white p-2">
+                    <QRCodeSVG value={created.link} size={148} level="M" />
+                  </div>
+                  <p className="text-[10px] text-ink-faint">scan to join on another device</p>
+                </div>
               </div>
-            </div>
-          ) : (
-            shares.length === 0 && (
-              <div className="rounded-card border border-dashed border-divider p-6 text-center text-[11px] text-ink-faint">
-                Your share link and QR code appear here once you create one.
-              </div>
-            )
-          )}
+            )}
 
-          {shares.length > 0 && (
-            <div>
-              <div className="section-title mb-2">Active shares ({shares.length})</div>
+            {shares.length > 0 && (
               <ul className="space-y-1">
                 {shares.map((s) => (
                   <li
@@ -421,18 +436,8 @@ export function ShellShareModal({
                   </li>
                 ))}
               </ul>
-            </div>
-          )}
-
-          {/* Host only. A peer cannot enroll devices — that would hand out host
-             authority from a guest seat — and the routes refuse it regardless, so
-             showing the section to them would only be a dead end. Their own
-             "continue on another device" affordance lives in the shared-session
-             panel, where it belongs: it re-uses their existing share rather than
-             creating anything. */}
-          {!peerMode && (
-            <HostDevicesSection publicBaseUrl={publicBaseUrl} enabled={running} />
-          )}
+            )}
+          </div>
         </div>
       </div>
     </Modal>

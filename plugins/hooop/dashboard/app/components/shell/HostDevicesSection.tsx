@@ -44,6 +44,7 @@ interface Enrollment {
 export function HostDevicesSection({
   publicBaseUrl,
   enabled,
+  sessionId,
 }: {
   /** The live tunnel URL. Devices are bound to it, so with no tunnel there is
    *  nothing to enroll against. */
@@ -51,6 +52,10 @@ export function HostDevicesSection({
   /** False while the tunnel isn't running — the button explains itself rather
    *  than failing on click. */
   enabled: boolean;
+  /** The session this dialog was opened for. Passed as a wake hint so a dormant
+   *  session is running by the time the device arrives; it does not scope the
+   *  device, which is install-wide. */
+  sessionId?: string;
 }) {
   const [devices, setDevices] = useState<HostDeviceRecord[]>([]);
   const [thisDevice, setThisDevice] = useState<string | null>(null);
@@ -84,7 +89,15 @@ export function HostDevicesSection({
     setThisDevice(d.thisDevice);
   }, [fetchDevices]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  // Refresh on open, then keep it current. "Last seen" is a live value, and a
+  // one-shot fetch froze it at whatever it was when the dialog opened — which is
+  // how a device that had just enrolled kept reading as untouched. Slow poll: this
+  // is a settings panel, not a feed.
+  useEffect(() => {
+    void refresh();
+    const iv = setInterval(() => { void refresh(); }, 10_000);
+    return () => clearInterval(iv);
+  }, [refresh]);
 
   // While a code is live: count down, and WATCH for the device arriving.
   //
@@ -142,7 +155,7 @@ export function HostDevicesSection({
       const res = await fetch("/api/host-device/code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ publicBaseUrl }),
+        body: JSON.stringify({ publicBaseUrl, sessionId: sessionId ?? null }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -165,7 +178,7 @@ export function HostDevicesSection({
     } finally {
       setMinting(false);
     }
-  }, [publicBaseUrl, fetchDevices]);
+  }, [publicBaseUrl, sessionId, fetchDevices]);
 
   const copyLink = useCallback(async () => {
     if (!enrollment) return;

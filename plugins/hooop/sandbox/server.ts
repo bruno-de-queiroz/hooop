@@ -37,6 +37,7 @@ import {
   endSession,
   renameSession,
   getActiveSession,
+  wakeSession,
   getPendingRequests,
   interruptSession,
   setSessionModel,
@@ -97,7 +98,6 @@ import {
   revokeHostDevice,
   revokeAllHostDevices,
   validateHostDevice,
-  getHostDevice,
   HostDeviceCapError,
 } from "./lib/host-devices";
 import {
@@ -306,6 +306,43 @@ const PARTICIPANT_HEADER = "x-hooop-participant";
  * second-class guest on your own session. The device only exists as a separate
  * thing in one place: the list the host revokes from.
  */
+/**
+ * Stamp "this device was seen" for any request that arrives as one, whatever the
+ * route does next.
+ *
+ * Tying last-seen to the participant GUARDS was wrong, and visibly so: most read
+ * routes never consult the participant at all, and several dashboard routes don't
+ * even forward it. A phone sitting in a session, loading the transcript and the
+ * file tree, therefore touched nothing — so the host's device list said "not used
+ * yet" about a device that was demonstrably in use, which is worse than showing
+ * nothing.
+ *
+ * Non-authoritative on purpose: it stamps a live device, ignores everything else,
+ * and never rejects. Authorization is still decided by the guards below.
+ */
+function touchHostDevice(req: IncomingMessage): void {
+  const raw = getHeader(req, PARTICIPANT_HEADER);
+  if (!raw || !raw.startsWith("host:")) return;
+  const deviceId = raw.slice("host:".length);
+  if (deviceId) validateHostDevice(deviceId);
+}
+
+/**
+ * Revive a session in the background because somebody is about to arrive on it.
+ * Never throws and never blocks the caller: a session that refuses to wake (it
+ * expired, or it is mid-teardown) still gets its share link, and the ordinary
+ * lazy revive on the next turn remains the fallback.
+ */
+function wakeIfDormant(sessionId: string, why: string): void {
+  const meta = getActiveSession(sessionId);
+  if (!meta || meta.status === "alive" || meta.status === "expired") return;
+  void wakeSession(meta.sessionId)
+    .then(() => log.info("sandbox", "woke a dormant session", { sessionId: meta.sessionId, why }))
+    .catch((e: unknown) => log.warn("sandbox", "could not wake a dormant session", {
+      sessionId: meta.sessionId, why, err: String(e),
+    }));
+}
+
 function isHostParticipant(raw: string | null): boolean {
   if (raw === "host") return true;
   if (!raw || !raw.startsWith("host:")) return false;
@@ -1828,6 +1865,15 @@ add("POST", "/shares", async (req, res) => {
     expiresInMs,
     peerName,
   });
+  // Handing somebody a way in should leave them something to walk into. A
+  // dormant session used to stay dormant until the next turn, so a guest could
+  // redeem the link, be admitted, and land in a session with no agent running —
+  // looking, from their side, like a broken invitation.
+  //
+  // Fire-and-forget rather than awaited: reviving spawns a child, and the host is
+  // waiting on a QR code, not on a process. It only has to be awake by the time
+  // somebody actually opens the link, which is seconds away at best.
+  wakeIfDormant(meta.sessionId, "share created");
   // The sandbox stores only grant metadata; the DASHBOARD signs the peer
   // token (it holds the HMAC secret). Return the record so the dashboard can
   // sign {shareId, sessionId, capability, host, exp}.
@@ -1926,10 +1972,15 @@ add("GET", "/shares/:id", (_req, res, params, url) => {
  * is the control, not enrollment. */
 add("POST", "/host-devices/enroll-code", async (req, res) => {
   if (!requireHost(req, res)) return;
-  let body: { publicHost?: unknown; label?: unknown; ttlMs?: unknown };
+  let body: { publicHost?: unknown; label?: unknown; ttlMs?: unknown; sessionId?: unknown };
   try { body = await readJson(req, MAX_BYTES_DEFAULT); } catch (e: any) { return err(res, e.status ?? 400, e.message); }
   const publicHost = boundedString(body.publicHost, 253);
   if (!publicHost) return err(res, 400, "missing required field: publicHost");
+  // Optional, and only ever a wake hint: the dialog the host minted this from is
+  // per-session, so adding a device to a dormant session should leave that session
+  // running by the time the device arrives. It grants nothing — a device is
+  // install-wide and is never scoped to a session.
+  const sessionId = boundedString(body.sessionId, 200);
   const label = typeof body.label === "string" ? body.label : null;
   const ttlMs = typeof body.ttlMs === "number" && Number.isFinite(body.ttlMs) ? body.ttlMs : null;
   let minted;
@@ -1947,6 +1998,7 @@ add("POST", "/host-devices/enroll-code", async (req, res) => {
   // body (straight into the QR the host is looking at) and NOWHERE else — not
   // the log line, not the event stream.
   log.info("host-devices", "enrollment code minted", { publicHost, expiresAt });
+  if (sessionId) wakeIfDormant(sessionId, "device enrolling");
   json(res, 200, { code, expiresAt, deviceTtlMs });
 });
 
@@ -1997,7 +2049,11 @@ add("GET", "/host-devices", (req, res) => {
  *
  * Returns metadata only, no secrets — there are none to return. */
 add("GET", "/host-devices/:id", (_req, res, params) => {
-  const d = getHostDevice(params.id);
+  // validateHostDevice, not getHostDevice: this probe runs (every ~5s) only for
+  // devices the front process is holding a LIVE FEED open for, which is the
+  // truest "in use right now" signal there is. Stamping here means a device
+  // sitting on the dashboard reads as seen even while it is only reading.
+  const d = validateHostDevice(params.id).record ?? null;
   if (!d) return err(res, 404, "unknown device");
   json(res, 200, {
     deviceId: d.deviceId,
@@ -2497,6 +2553,11 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, kind: Listene
     if (!authorize(req, route)) {
       return err(res, 401, "unauthorized", rid);
     }
+
+    // After authorization, before anything route-specific: an authenticated
+    // request carrying a device identity is that device being seen, whether the
+    // route it wants happens to care who is calling or not.
+    touchHostDevice(req);
 
     // Sandbox-side rate limit for mutating routes — defence-in-depth if the
     // dashboard is compromised or if some other client picks up the sandbox

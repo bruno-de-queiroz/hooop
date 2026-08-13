@@ -60,7 +60,7 @@ let shareLive = true;
 
 vi.mock("./lib/shares", () => ({
   bootShares: vi.fn(),
-  createShare: vi.fn(),
+  createShare: vi.fn(() => ({ ...share, shareId: "new-share" })),
   revokeShare: vi.fn(),
   revokeAllShares: vi.fn(() => ({ revoked: [] })),
   revokeSharesForSession: vi.fn(() => ({ revoked: [] })),
@@ -76,6 +76,11 @@ vi.mock("./lib/shares", () => ({
     action === "notify" ? true : cap === "full" ? true : cap === "drive" && action === "turn",
 }));
 
+// ---- session registry: controllable status, so dormancy can be simulated ----
+let sessionStatus = "alive";
+const getActiveSession = vi.fn((id: string) => ({ sessionId: id, cwd: "/tmp", status: sessionStatus }));
+const wakeSession = vi.fn(async (_sessionId: string) => ({}));
+
 // ---- remaining heavy deps (mirrors server.test.ts) ----
 vi.mock("./lib/ingestor", () => ({
   ingestEventLine: vi.fn(() => ({ ok: true, id: 1 })),
@@ -90,8 +95,8 @@ vi.mock("./lib/active-sessions", () => ({
   isValidSkillName: () => true, writeUserTurn: vi.fn(), isControllable: vi.fn(() => false),
   endSession: vi.fn(), deleteSession: vi.fn(), renameSession: vi.fn(),
   // Identity resolver: every id is already canonical here.
-  getActiveSession: vi.fn((id: string) => ({ sessionId: id, cwd: "/tmp", status: "alive" })),
-  markSessionActive: vi.fn(), wakeSession: vi.fn(async () => ({})),
+  getActiveSession: (...a: unknown[]) => getActiveSession(...(a as [string])),
+  markSessionActive: vi.fn(), wakeSession: (...a: unknown[]) => wakeSession(...(a as [string])),
   popPendingAuthor: vi.fn(() => ({ author: null, thumbnails: null, kind: null })),
   markTurnFinished: vi.fn(), activeSessionsBus: new EventEmitter(),
   bootActiveSessions: vi.fn(), startIdleSweeper: vi.fn(), shutdownActiveSessions: vi.fn(),
@@ -177,6 +182,7 @@ let srv: TestServer;
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  sessionStatus = "alive";
   prevHome = process.env.HOME;
   fakeHome = mkdtempSync(join(tmpdir(), "sandbox-host-devices-home-"));
   process.env.HOME = fakeHome;
@@ -347,5 +353,118 @@ describe("tunnel teardown", () => {
     expect(JSON.parse(res.body).devicesRevoked).toBe(1);
     const after = await doRequest(srv.socketPath, "GET", "/host-devices", srv.token, undefined, `host:${deviceId}`);
     expect(after.status).toBe(403);
+  });
+});
+
+describe("last seen", () => {
+  it("starts at the moment of enrollment, not at nothing", async () => {
+    // "not used yet" about a device that just walked in reads as a broken
+    // feature. Redeeming the code IS the device talking to us.
+    const deviceId = await enrollDevice();
+    const list = await doRequest(srv.socketPath, "GET", "/host-devices", srv.token);
+    const [d] = JSON.parse(list.body).devices as Array<{ deviceId: string; lastSeenAt: number | null }>;
+    expect(d.deviceId).toBe(deviceId);
+    expect(d.lastSeenAt).toBeGreaterThan(0);
+  });
+
+  it("advances on ANY request the device makes, not just guarded ones", async () => {
+    // The bug this covers: last-seen was only stamped by the participant guards,
+    // and most read routes never consult the participant at all — so a phone
+    // loading the transcript and the file tree looked idle.
+    const deviceId = await enrollDevice();
+    const before = JSON.parse(
+      (await doRequest(srv.socketPath, "GET", "/host-devices", srv.token)).body,
+    ).devices[0].lastSeenAt as number;
+
+    await new Promise((r) => setTimeout(r, 5));
+    // A plain read route that does not look at the participant at all.
+    const read = await doRequest(srv.socketPath, "GET", "/sessions", srv.token, undefined, `host:${deviceId}`);
+    expect(read.status).toBe(200);
+
+    const after = JSON.parse(
+      (await doRequest(srv.socketPath, "GET", "/host-devices", srv.token)).body,
+    ).devices[0].lastSeenAt as number;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it("advances on the liveness probe, so a device with an open feed reads as here", async () => {
+    const deviceId = await enrollDevice();
+    const before = JSON.parse(
+      (await doRequest(srv.socketPath, "GET", "/host-devices", srv.token)).body,
+    ).devices[0].lastSeenAt as number;
+
+    await new Promise((r) => setTimeout(r, 5));
+    await doRequest(srv.socketPath, "GET", `/host-devices/${deviceId}`, srv.token, undefined, null);
+
+    const after = JSON.parse(
+      (await doRequest(srv.socketPath, "GET", "/host-devices", srv.token)).body,
+    ).devices[0].lastSeenAt as number;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it("never stamps a revoked device back to life", async () => {
+    const deviceId = await enrollDevice();
+    await doRequest(srv.socketPath, "POST", `/host-devices/${deviceId}/revoke`, srv.token);
+    const read = await doRequest(srv.socketPath, "GET", "/sessions", srv.token, undefined, `host:${deviceId}`);
+    // The read route itself doesn't gate on the participant, so it still answers —
+    // the point is that the dead device is not resurrected in the registry.
+    expect(read.status).toBe(200);
+    const list = await doRequest(srv.socketPath, "GET", "/host-devices", srv.token);
+    expect(JSON.parse(list.body).devices).toHaveLength(0);
+  });
+});
+
+describe("waking a dormant session", () => {
+  it("wakes it when a device is added from that session's dialog", async () => {
+    // Adding a device to a session you are looking at should leave that session
+    // running, or the new screen arrives at a session with no agent behind it.
+    sessionStatus = "dormant";
+    const res = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST, sessionId: "sess-1" });
+    expect(res.status).toBe(200);
+    expect(wakeSession).toHaveBeenCalledWith("sess-1");
+  });
+
+  it("leaves an already-awake session alone", async () => {
+    sessionStatus = "alive";
+    await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST, sessionId: "sess-1" });
+    expect(wakeSession).not.toHaveBeenCalled();
+  });
+
+  it("never tries to revive an EXPIRED session", async () => {
+    sessionStatus = "expired";
+    await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST, sessionId: "sess-1" });
+    expect(wakeSession).not.toHaveBeenCalled();
+  });
+
+  it("still mints the code when the session is unknown", async () => {
+    // The sessionId is a hint, not a parameter of the grant. A stale one must not
+    // cost the host their code.
+    getActiveSession.mockReturnValueOnce(undefined as never);
+    const res = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST, sessionId: "gone" });
+    expect(res.status).toBe(200);
+    expect(wakeSession).not.toHaveBeenCalled();
+  });
+
+  it("wakes it when a SHARE is created for it, the other way somebody arrives", async () => {
+    // Same helper, same reasoning: a guest who redeems a link and is admitted
+    // should not land in a session with no agent running. Asserted here beside the
+    // device case because there is one wake path, not two.
+    sessionStatus = "dormant";
+    const res = await doRequest(srv.socketPath, "POST", "/shares", srv.token,
+      { sessionId: "sess-1", publicHost: HOST });
+    expect(res.status).toBe(200);
+    expect(wakeSession).toHaveBeenCalledWith("sess-1");
+  });
+
+  it("still mints the code when waking fails", async () => {
+    sessionStatus = "dormant";
+    wakeSession.mockRejectedValueOnce(new Error("nope"));
+    const res = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST, sessionId: "sess-1" });
+    expect(res.status).toBe(200);
   });
 });

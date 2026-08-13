@@ -309,7 +309,10 @@ export function redeemEnrollCode(
     createdAt: now,
     expiresAt: now + entry.ttlMs,
     revoked: false,
-    lastSeenAt: null,
+    // Redeeming the code IS the device talking to us, and it lands in the
+    // dashboard immediately afterwards. Starting at null meant the list opened on
+    // "not used yet" about a device that had just walked in.
+    lastSeenAt: now,
   };
   devices.set(device.deviceId, device);
   persist();

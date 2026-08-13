@@ -188,11 +188,24 @@ describe("host device registry", () => {
       expect(mod.listHostDevices()).toHaveLength(8);
     });
 
-    it("records last-seen on validation", () => {
+    it("is seen from the moment it enrolls, and again on every validation", () => {
+      // Starting at null meant the host's list opened on "not used yet" about a
+      // device that had just walked in. Redeeming the code IS the device talking.
+      vi.useFakeTimers();
       const device = enroll();
-      expect(mod.getHostDevice(device.deviceId)?.lastSeenAt).toBeNull();
+      const atEnrollment = mod.getHostDevice(device.deviceId)?.lastSeenAt;
+      expect(atEnrollment).toBeGreaterThan(0);
+
+      vi.advanceTimersByTime(1000);
       mod.validateHostDevice(device.deviceId);
-      expect(mod.getHostDevice(device.deviceId)?.lastSeenAt).toBeGreaterThan(0);
+      expect(mod.getHostDevice(device.deviceId)?.lastSeenAt).toBeGreaterThan(atEnrollment!);
+    });
+
+    it("does not stamp a revoked device", () => {
+      const device = enroll();
+      mod.revokeHostDevice(device.deviceId);
+      expect(mod.validateHostDevice(device.deviceId).ok).toBe(false);
+      expect(mod.getHostDevice(device.deviceId)).toBeNull();
     });
 
     it("lists devices oldest first", () => {
