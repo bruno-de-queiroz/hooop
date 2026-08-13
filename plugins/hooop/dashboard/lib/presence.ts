@@ -88,6 +88,30 @@ const EVICT_MS = 3 * 60_000;
 // and shorter than the 10s heartbeat, so an actively-typing client (which
 // re-asserts on each keystroke) never flickers.
 const TYPING_TTL_MS = 6_000;
+// How recently one of a person's OTHER screens must have beaten for an explicit
+// "Leave session" to count as "they're still here" and withhold the departure
+// marker (see leave()).
+//
+// Neither constant above fits, which is why this is its own. EVICT_MS is far too
+// generous for the question: a mobile tab killed by the OS never sends its leave
+// beat, so its entry lingers for three minutes — long enough that leaving
+// deliberately on the OTHER device emitted no marker at all, and then never
+// would. IDLE_MS is too tight in the other direction: a backgrounded tab is
+// alive but throttled to roughly one beat a minute, and calling that person gone
+// would announce a departure while they are still connected.
+//
+// A minute and a half tolerates one missed throttled beat and nothing more. The
+// failure it prefers is the recoverable one: a slightly early "left" line for
+// somebody who reappears, rather than a deliberate exit that goes unrecorded.
+const STILL_WATCHING_MS = 90_000;
+// Cap on how many screens ONE participant may occupy. Entries used to be one per
+// participant, so nothing needed bounding; keyed per screen, a client that
+// invents a fresh viewerId on every beat would accumulate them until eviction.
+// Nothing about presence grants access, so this is housekeeping rather than a
+// hole — but "bounded by the rate limiter and a 3-minute sweep" is not a bound
+// anyone should have to derive. Oldest screen goes first: a real person watching
+// from a tenth device is not a case worth preserving.
+const MAX_VIEWERS_PER_PARTICIPANT = 8;
 
 function state(): PresenceState {
   const g = globalThis as unknown as { __hooop_presence__?: PresenceState };
@@ -101,6 +125,18 @@ function state(): PresenceState {
 
 export function presenceBus(): EventEmitter {
   return state().bus;
+}
+
+/** Make room before adding a NEW screen for a participant who is already at the
+ *  cap, dropping their oldest. Called only on a first-seen key, so the common
+ *  path (an existing screen beating again) does no work at all. */
+function capViewers(map: Map<string, PresenceEntry>, participantId: string): void {
+  const mine = [...map.entries()].filter(([, e]) => e.participantId === participantId);
+  if (mine.length < MAX_VIEWERS_PER_PARTICIPANT) return;
+  mine.sort((a, b) => a[1].lastSeen - b[1].lastSeen);
+  for (let i = 0; i <= mine.length - MAX_VIEWERS_PER_PARTICIPANT; i++) {
+    map.delete(mine[i][0]);
+  }
 }
 
 function evictStale(map: Map<string, PresenceEntry>): void {
@@ -140,7 +176,9 @@ export function heartbeat(opts: {
   // stale within the TTL once assertions stop (idle, tab backgrounded, dropped
   // request) — see listPresence.
   const viewerId = opts.viewerId || DEFAULT_VIEWER;
-  map.set(viewerKey(opts.participantId, viewerId), {
+  const key = viewerKey(opts.participantId, viewerId);
+  if (!map.has(key)) capViewers(map, opts.participantId);
+  map.set(key, {
     participantId: opts.participantId,
     viewerId,
     name: opts.name,
@@ -191,12 +229,19 @@ export function leave(
     }
   }
   if (removed) s.bus.emit("change", { sessionId });
-  // Count what's LEFT for this participant, after the removal and after evicting
-  // corpses — a dead tab that never beat again must not keep somebody's departure
-  // silent for the full eviction window.
+  // What's LEFT for this participant — counting only screens that are still
+  // BEATING, not merely still in the map. A tab the OS killed never sends its
+  // leave beat and lingers for the full eviction window, which is exactly how an
+  // explicit "Leave session" on the other device came to emit no marker at all
+  // (and then never would, since nothing revisits the decision later). Killed
+  // mobile tabs are not an exotic case here; they are the case this whole feature
+  // is about. See STILL_WATCHING_MS for why that window is its own constant.
   evictStale(map);
+  const cutoff = Date.now() - STILL_WATCHING_MS;
   let remaining = 0;
-  for (const e of map.values()) if (e.participantId === participantId) remaining++;
+  for (const e of map.values()) {
+    if (e.participantId === participantId && e.lastSeen > cutoff) remaining++;
+  }
   return { gone: remaining === 0 };
 }
 

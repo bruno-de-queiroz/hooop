@@ -72,6 +72,16 @@ export const MAX_DEVICE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  *  meaningful product limit — nobody pairs eight phones. */
 const MAX_DEVICES = 8;
 
+/** Thrown when the host asks for a code with the device list already full. A
+ *  distinct type so the route can answer this ONE case honestly (409 + "revoke
+ *  one first"); every failure on the redeem side stays deliberately opaque. */
+export class HostDeviceCapError extends Error {
+  constructor() {
+    super(`already holding the maximum of ${MAX_DEVICES} devices; revoke one first`);
+    this.name = "HostDeviceCapError";
+  }
+}
+
 /** An enrollment code is single-use and dies fast: it is a bearer secret that
  *  briefly grants HOST authority, so its window is the walk from the laptop to
  *  the phone, not a coffee break. */
@@ -222,6 +232,18 @@ export function createEnrollCode(opts: {
 }): { code: string; expiresAt: number; deviceTtlMs: number } {
   bootHostDevices();
   sweepCodes();
+  // Refuse at MINT time when the device list is full, not at redeem.
+  //
+  // The redeem side has to answer every failure with one opaque message, or it
+  // becomes an oracle for "was that code real?" — which would have told the host
+  // "invalid, expired or already used" on their phone when the real problem was a
+  // full list. Here the caller is the authenticated host, so the truth is both
+  // safe to say and actionable, and it is said before they walk to the other
+  // device.
+  pruneDead();
+  if (devices.size >= MAX_DEVICES) {
+    throw new HostDeviceCapError();
+  }
   if (codes.size >= MAX_CODES) {
     const oldest = [...codes.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
     if (oldest) codes.delete(oldest.code);

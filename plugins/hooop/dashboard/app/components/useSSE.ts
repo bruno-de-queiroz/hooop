@@ -66,12 +66,17 @@ function connect() {
   };
   ws.onclose = (e) => {
     if (socket === ws) socket = null;
-    // 4403 = the server cut this peer's feed because their share was revoked.
-    // Stop reconnecting (a revoked link can't re-open the channel) and tell the
-    // UI so it can take over with an "access ended" state.
+    // 4403 = the server cut this feed because the credential behind it was
+    // revoked. Stop reconnecting (a revoked grant can't re-open the channel) and
+    // tell the UI so it can take over with an "access ended" state.
+    //
+    // The close REASON matters now: it is "share revoked" for a guest, and
+    // "device revoked" for the host on one of their own enrolled devices. Those
+    // two people need different sentences — telling the host to ask the host for
+    // a fresh link is nonsense — so pass it through rather than assuming.
     if (e.code === 4403) {
       closedByUs = true;
-      dispatch("revoked", { reason: "share revoked" });
+      dispatch("revoked", { reason: e.reason || "share revoked" });
       return;
     }
     scheduleReconnect();

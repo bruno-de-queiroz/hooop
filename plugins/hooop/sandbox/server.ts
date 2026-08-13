@@ -98,6 +98,7 @@ import {
   revokeAllHostDevices,
   validateHostDevice,
   getHostDevice,
+  HostDeviceCapError,
 } from "./lib/host-devices";
 import {
   vapidPublicKey,
@@ -1931,7 +1932,17 @@ add("POST", "/host-devices/enroll-code", async (req, res) => {
   if (!publicHost) return err(res, 400, "missing required field: publicHost");
   const label = typeof body.label === "string" ? body.label : null;
   const ttlMs = typeof body.ttlMs === "number" && Number.isFinite(body.ttlMs) ? body.ttlMs : null;
-  const { code, expiresAt, deviceTtlMs } = createEnrollCode({ publicHost, label, ttlMs });
+  let minted;
+  try {
+    minted = createEnrollCode({ publicHost, label, ttlMs });
+  } catch (e) {
+    // The one enrollment failure worth spelling out: the caller is the
+    // authenticated host, so "you are at the cap" is safe to say and is the only
+    // thing that tells them what to do about it.
+    if (e instanceof HostDeviceCapError) return err(res, 409, e.message);
+    throw e;
+  }
+  const { code, expiresAt, deviceTtlMs } = minted;
   // The code is a bearer credential for host authority. It goes in the response
   // body (straight into the QR the host is looking at) and NOWHERE else — not
   // the log line, not the event stream.

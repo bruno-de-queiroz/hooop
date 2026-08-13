@@ -214,6 +214,17 @@ describe("host device enrollment routes", () => {
     expect(JSON.parse(list.body).devices).toHaveLength(1);
   });
 
+  it("answers 409 with a plain reason when the device list is full", async () => {
+    // The host is authenticated here, so this is the one enrollment failure we
+    // spell out — the redeem side has to stay opaque, which would otherwise leave
+    // them reading "invalid or expired code" on the phone for a full list.
+    for (let i = 0; i < 8; i++) await enrollDevice(`d${i}`);
+    const res = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST });
+    expect(res.status).toBe(409);
+    expect(JSON.parse(res.body).error).toContain("revoke one first");
+  });
+
   it("refuses to mint a code for a peer", async () => {
     // A guest handing out host credentials would invert the entire trust model.
     const res = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,

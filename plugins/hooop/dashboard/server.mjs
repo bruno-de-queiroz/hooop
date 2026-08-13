@@ -821,6 +821,14 @@ async function authorizePreview(req, preview) {
   // tears down the tunnel for everyone at once. Must return BEFORE the
   // shareLiveCached call below, which would otherwise look up a share named
   // "host", find none, and read that as revoked.
+  // `sid` is what the checks below re-derive access from, and verifyPreviewToken
+  // never validated its type — it only insists on `pv` and `exp`. A grant without
+  // one names no revocable thing, so it cannot be re-checked and must not be
+  // guessed at. (It also used to fall through to a shareLive(undefined) that
+  // resolved TRUE, quietly admitting it.)
+  if (typeof payload.sid !== "string" || !payload.sid) {
+    return { ok: false, status: 403, reason: "no-grant" };
+  }
   if (payload.sid === "host") return { ok: true };
   // The host on one of their own ENROLLED DEVICES. Unlike the bare "host" above,
   // this one IS revocable, so it gets re-checked like a share does: revoking the

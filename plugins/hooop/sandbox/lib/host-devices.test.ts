@@ -164,15 +164,28 @@ describe("host device registry", () => {
       expect(mod.pendingEnrollCount()).toBe(0);
     });
 
-    it("caps how many devices one install may hold", () => {
+    it("refuses to MINT a code once the list is full, and says why", () => {
+      // Said out loud here because the caller is the authenticated host. The
+      // redeem side cannot afford to be this specific (it would become an oracle
+      // for "was that code real?"), so catching it at mint is the only place the
+      // host learns what to do — before walking to the other device.
       for (let i = 0; i < 8; i++) enroll(`d${i}`);
-      const { code } = mod.createEnrollCode({ publicHost: HOST });
-      const r = mod.redeemEnrollCode(code, HOST);
-      expect(r.ok).toBe(false);
+      expect(() => mod.createEnrollCode({ publicHost: HOST })).toThrow(mod.HostDeviceCapError);
+
       // Revoking one makes room again.
       mod.revokeHostDevice(mod.listHostDevices()[0].deviceId);
-      const { code: code2 } = mod.createEnrollCode({ publicHost: HOST });
-      expect(mod.redeemEnrollCode(code2, HOST).ok).toBe(true);
+      const { code } = mod.createEnrollCode({ publicHost: HOST });
+      expect(mod.redeemEnrollCode(code, HOST).ok).toBe(true);
+    });
+
+    it("still enforces the cap at REDEEM, for a code minted before the list filled", () => {
+      // The mint check is a courtesy; this one is the invariant. A code minted
+      // with room to spare must not be redeemable after the last slot went.
+      for (let i = 0; i < 7; i++) enroll(`d${i}`);
+      const { code } = mod.createEnrollCode({ publicHost: HOST }); // room at this point
+      enroll("the-eighth");                                        // ...and now there isn't
+      expect(mod.redeemEnrollCode(code, HOST).ok).toBe(false);
+      expect(mod.listHostDevices()).toHaveLength(8);
     });
 
     it("records last-seen on validation", () => {

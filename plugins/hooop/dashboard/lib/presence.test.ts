@@ -195,6 +195,56 @@ describe("presence registry", () => {
       expect(mod.listPresence("s1")).toHaveLength(0);
     });
 
+    it("still reports gone when another screen DIED without leaving", () => {
+      // Regression. A mobile tab killed by the OS never sends its leave beat, so
+      // its entry lingers for the eviction window — and counting it as "still
+      // watching" meant a deliberate Leave on the laptop emitted no marker at
+      // all. Not delayed: lost, because nothing revisits the decision later.
+      vi.useFakeTimers();
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "phone", name: "Ana", kind: "peer" });
+      vi.advanceTimersByTime(120_000); // past STILL_WATCHING_MS, short of EVICT_MS
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "laptop", name: "Ana", kind: "peer" });
+
+      expect(mod.leave("s1", "peer:abc", "laptop").gone).toBe(true);
+    });
+
+    it("a merely THROTTLED background screen still counts as present", () => {
+      // The other side of the same trade: a backgrounded tab is alive but beating
+      // roughly once a minute, and announcing a departure for somebody still
+      // connected would be just as wrong.
+      vi.useFakeTimers();
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "phone", name: "Ana", kind: "peer" });
+      vi.advanceTimersByTime(60_000); // one throttled beat's worth
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "laptop", name: "Ana", kind: "peer" });
+
+      expect(mod.leave("s1", "peer:abc", "laptop").gone).toBe(false);
+    });
+
+    it("caps how many screens one participant can occupy", () => {
+      // Keyed per screen, a client inventing a viewerId per beat would pile up
+      // entries until eviction. Presence grants nothing, so this is housekeeping —
+      // but an unbounded map is not something to leave to a rate limiter.
+      vi.useFakeTimers();
+      for (let i = 0; i < 30; i++) {
+        vi.advanceTimersByTime(10);
+        mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: `v${i}`, name: "Ana", kind: "peer" });
+      }
+      const list = mod.listPresence("s1");
+      expect(list).toHaveLength(1);
+      expect(list[0].viewers).toBe(8);
+    });
+
+    it("the cap never evicts another participant's screens", () => {
+      vi.useFakeTimers();
+      mod.heartbeat({ sessionId: "s1", participantId: "host", viewerId: "laptop", name: "Bruno", kind: "host" });
+      for (let i = 0; i < 30; i++) {
+        vi.advanceTimersByTime(10);
+        mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: `v${i}`, name: "Ana", kind: "peer" });
+      }
+      const host = mod.listPresence("s1").find((p) => p.participantId === "host");
+      expect(host?.viewers).toBe(1);
+    });
+
     it("leave() with no viewerId drops every screen (acting on the identity)", () => {
       mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "v1", name: "Bob", kind: "peer" });
       mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "v2", name: "Bob", kind: "peer" });
