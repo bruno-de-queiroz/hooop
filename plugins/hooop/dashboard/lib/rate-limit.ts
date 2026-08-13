@@ -60,3 +60,19 @@ export const mutatingRequestLimiter: RateLimiter = createRateLimiter({
   max: DEFAULT_MAX,
   windowMs: DEFAULT_WINDOW_MS,
 });
+
+/**
+ * Host-device enrollment attempts, keyed by client IP.
+ *
+ * The enrollment endpoint is reachable from the tunnel with NO credential — it
+ * has to be, since the phone redeeming a code holds nothing yet — and what it
+ * guards is an 8-character code that buys host authority. Online guessing is the
+ * one attack that matters, so the budget is deliberately mean: a handful of
+ * tries a minute, which is generous for a human mistyping a code off a screen
+ * and useless for a script. Codes are also single-use and expire in two minutes,
+ * so an attacker gets one shot per value against a target that keeps moving.
+ */
+export const enrollAttemptLimiter: RateLimiter = createRateLimiter({
+  max: 10,
+  windowMs: 60_000,
+});

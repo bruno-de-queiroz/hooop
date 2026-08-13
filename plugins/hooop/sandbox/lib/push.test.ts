@@ -31,6 +31,7 @@ describe("push registry", () => {
   let fakeHome: string;
   let push: typeof import("./push");
   let shares: typeof import("./shares");
+  let devices: typeof import("./host-devices");
 
   // Imported ONCE. STATE_DIR is derived from HOME at module load, so HOME has to
   // be redirected before the first import and stay put; per-test isolation then
@@ -44,6 +45,7 @@ describe("push registry", () => {
     process.env.HOME = fakeHome;
     push = await import("./push");
     shares = await import("./shares");
+    devices = await import("./host-devices");
   });
 
   afterAll(() => {
@@ -56,6 +58,7 @@ describe("push registry", () => {
     sendNotification.mockClear();
     sendNotification.mockImplementation(async () => ({ statusCode: 201 }));
     shares.revokeAllShares();
+    devices.revokeAllHostDevices();
     rmSync(join(fakeHome, ".claude", "hooop", "push.json"), { force: true });
     push.__resetPushForTests();
     push.bootPush();
@@ -66,6 +69,22 @@ describe("push registry", () => {
       ownerKind: "host", shareId: null, sessionId: null, displayName: "host",
       capability: null, endpoint: "https://push.example/host", keys: KEYS,
     });
+  }
+
+  /** The host's own phone: owner "host", but tagged with the device it came from
+   *  so it can be revoked on its own. */
+  function addDevice(deviceId: string, endpoint = `https://push.example/${deviceId}`) {
+    return push.addSubscription({
+      ownerKind: "host", shareId: null, sessionId: null, displayName: "host",
+      capability: null, deviceId, endpoint, keys: KEYS,
+    });
+  }
+
+  function enrollDevice(label = "phone") {
+    const { code } = devices.createEnrollCode({ publicHost: "x.trycloudflare.com", label });
+    const r = devices.redeemEnrollCode(code, "x.trycloudflare.com");
+    if (!r.ok) throw new Error("enroll failed");
+    return r.device.deviceId;
   }
 
   function addPeer(opts: { shareId: string; sessionId: string; name?: string; capability?: "full" | "drive" | "spectate"; endpoint?: string }) {
@@ -131,6 +150,62 @@ describe("push registry", () => {
 
       shares.revokeSharesForSession("s1");
       expect(push.listSubscriptions()).toHaveLength(0);
+    });
+
+    it("drops a DEVICE's subscription the moment that device is revoked", () => {
+      // Same security property as the peer case, and it needs saying out loud: a
+      // revoked phone must stop being handed message bodies immediately. The
+      // laptop's own subscription is untouched — it is the same person, but it is
+      // not the screen that lost its credential.
+      const deviceId = enrollDevice();
+      addHost();
+      addDevice(deviceId);
+      expect(push.listSubscriptions()).toHaveLength(2);
+
+      devices.revokeHostDevice(deviceId);
+
+      const left = push.listSubscriptions();
+      expect(left).toHaveLength(1);
+      expect(left[0].deviceId).toBeNull();
+    });
+
+    it("drops device subscriptions when every device is revoked (tunnel down)", () => {
+      const a = enrollDevice("phone");
+      const b = enrollDevice("tablet");
+      addHost();
+      addDevice(a, "https://push.example/a");
+      addDevice(b, "https://push.example/b");
+
+      devices.revokeAllHostDevices();
+      expect(push.listSubscriptions().map((r) => r.deviceId)).toEqual([null]);
+    });
+
+    it("does NOT keep a device subscription across a restart", () => {
+      // It was minted on the tunnel origin, which is gone, and the device registry
+      // is cleared at boot too — so it is a subscription owned by nobody. Only the
+      // host at the machine has a stable origin to come back to.
+      addHost();
+      addDevice("device-1");
+      expect(push.listSubscriptions()).toHaveLength(2);
+
+      push.__resetPushForTests();
+      push.bootPush();
+
+      const after = push.listSubscriptions();
+      expect(after).toHaveLength(1);
+      expect(after[0].deviceId).toBeNull();
+    });
+
+    it("revoking a device leaves the host's MUTES alone", () => {
+      // Mutes are keyed to the person, not the screen. Losing your phone must not
+      // un-silence the sessions you silenced.
+      const deviceId = enrollDevice();
+      addDevice(deviceId);
+      push.setMute("host", "s1", true);
+      expect(push.listMutes("host")).toHaveLength(1);
+
+      devices.revokeHostDevice(deviceId);
+      expect(push.listMutes("host")).toHaveLength(1);
     });
 
     it("treats a re-subscribe with the same endpoint as the same device", () => {
@@ -373,6 +448,37 @@ describe("push registry", () => {
       // Ana is watching; the host is not.
       push.setParticipantActive(push.ownerKeyFor("peer", "share-1"), "s1");
       expect((await push.notifyForEvent(chat("s1", "someone-else"))).sent).toBe(1);
+    });
+
+    it("a backgrounded second screen does not un-suppress the one being watched", async () => {
+      // The bug multi-device made routine: presence was one slot per participant,
+      // so the phone going into a pocket (active:false → clear) erased the laptop
+      // in front of you, and the phone then buzzed about the message on screen.
+      addHost();
+      push.setParticipantActive("host", "s1", "laptop");
+      push.setParticipantActive("host", "s1", "phone");
+      // Phone backgrounds.
+      push.setParticipantActive("host", null, "phone");
+      // Laptop is still watching, so still nothing to tell them.
+      expect((await push.notifyForEvent(chat("s1", "Ana"))).sent).toBe(0);
+    });
+
+    it("resumes once EVERY screen has gone", async () => {
+      addHost();
+      push.setParticipantActive("host", "s1", "laptop");
+      push.setParticipantActive("host", "s1", "phone");
+      push.setParticipantActive("host", null, "phone");
+      push.setParticipantActive("host", null, "laptop");
+      expect((await push.notifyForEvent(chat("s1", "Ana"))).sent).toBe(1);
+    });
+
+    it("two screens on different sessions each suppress their own", async () => {
+      addHost();
+      push.setParticipantActive("host", "s1", "laptop");
+      push.setParticipantActive("host", "s2", "phone");
+      expect((await push.notifyForEvent(chat("s1", "Ana"))).sent).toBe(0);
+      expect((await push.notifyForEvent(chat("s2", "Ana"))).sent).toBe(0);
+      expect((await push.notifyForEvent(chat("s3", "Ana"))).sent).toBe(1);
     });
 
     it("matches a watched session through a resumed id", async () => {

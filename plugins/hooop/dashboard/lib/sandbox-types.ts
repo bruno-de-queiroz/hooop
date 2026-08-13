@@ -291,6 +291,19 @@ export interface ShareRecord {
   revoked: boolean;
 }
 
+/** One of the host's OWN enrolled devices — their phone or tablet, holding a
+ *  revocable credential so it can be the host over the tunnel instead of a guest
+ *  with a nickname. Mirrors sandbox/lib/host-devices.ts HostDeviceRecord. */
+export interface HostDeviceRecord {
+  deviceId: string;
+  label: string;
+  publicHost: string;
+  createdAt: number;
+  expiresAt: number | null;
+  revoked: boolean;
+  lastSeenAt: number | null;
+}
+
 // ── Live previews ───────────────────────────────────────────────────────────
 // The spec and runtime vocabulary live in @shared/preview-spec (the sandbox and
 // the preview runner use the same definitions); these are the dashboard-facing

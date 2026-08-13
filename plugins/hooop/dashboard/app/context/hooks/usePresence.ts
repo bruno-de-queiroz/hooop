@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSSE } from "@/app/components/useSSE";
-import { myDisplayName } from "@/app/components/lib/participant";
+import { myDisplayName, viewerId } from "@/app/components/lib/participant";
 
 export interface PresenceParticipant {
   participantId: string;
@@ -82,7 +82,7 @@ export function usePresence(sessionId: string | null): {
     fetch("/api/presence", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: sid, name: myDisplayName(), typing, active }),
+      body: JSON.stringify({ sessionId: sid, name: myDisplayName(), typing, active, viewerId: viewerId() }),
     })
       // Only `me` is taken from this response, never the roster — see above.
       // Identity can't go stale the way a participant list can: it is fixed for
@@ -139,7 +139,9 @@ export function usePresence(sessionId: string | null): {
         fetch("/api/presence", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: sid, leaving: true }),
+          // Scoped to THIS tab: closing one screen must not drop the person
+          // from the roster while their other screen is still watching.
+          body: JSON.stringify({ sessionId: sid, leaving: true, viewerId: viewerId() }),
           keepalive: true,
         }).catch(() => {});
       } catch { /* ignore */ }

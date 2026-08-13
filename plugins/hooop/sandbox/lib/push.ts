@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import webpush from "web-push";
 import { STATE_DIR } from "./paths";
 import { onSharesRevoked, type ShareCapability } from "./shares";
+import { onHostDevicesRevoked } from "./host-devices";
 import { eventBus } from "./ingestor";
 import { classifyEvent, type NotifyCategory } from "@shared/notifiable";
 import { toHandle } from "@shared/handles";
@@ -36,7 +37,10 @@ import { log } from "@shared/logger";
  * live subscription would keep receiving session content — message bodies and
  * all — with no way for the host to stop it.
  *
- * Host subscriptions persist across restarts: localhost:7842 is a stable origin.
+ * A host DEVICE subscription (the operator's own phone) gets the peer treatment
+ * rather than the host one, because it has the peer's lifetime: it was minted on
+ * the tunnel origin and its grant is revocable. Only the host at the machine
+ * persists across restarts, because localhost:7842 is a stable origin.
  */
 
 const PUSH_FILE = join(STATE_DIR, "push.json");
@@ -93,13 +97,28 @@ export interface PushSubscriptionRecord {
    */
   displayName: string | null;
   capability: ShareCapability | null;
+  /**
+   * Host only — WHICH of the host's screens this is, when it is one of their
+   * enrolled devices rather than the machine itself (null for the machine).
+   *
+   * Recorded for exactly one reason, and it is the same reason a peer's row
+   * carries its shareId: a revoked credential must not keep receiving session
+   * content. Without it, a phone's subscription is indistinguishable from the
+   * laptop's, so revoking the phone would leave it being delivered message
+   * bodies with no way for the host to stop it — the leak the share path is
+   * careful to close.
+   *
+   * It does NOT scope delivery. A device is the host, so it hears about every
+   * session and shares the host's mutes; this is only a handle to revoke by.
+   */
+  deviceId: string | null;
   endpoint: string;
   keys: { p256dh: string; auth: string };
   createdAt: number;
 }
 
 /**
- * Who is currently here, keyed by participant rather than by device.
+ * Who is currently here — recorded per screen, answered per participant.
  *
  * Fed from the dashboard's existing presence heartbeat — the same signal that
  * dims an avatar — rather than a second mechanism of our own. The client
@@ -111,13 +130,27 @@ export interface PushSubscriptionRecord {
  * you're actively watching the session on your laptop, your phone shouldn't
  * buzz either.
  *
+ * Which is why the map is keyed per SCREEN and read per participant, rather than
+ * holding one slot per participant. One slot made the newest beat the only truth,
+ * so the phone going into your pocket ("I'm not looking") erased the laptop
+ * sitting in front of you ("I am"), and the phone then buzzed about the message
+ * you were reading — the precise outcome the paragraph above says we want to
+ * avoid. `isWatching` answers "is ANY of their screens on it", so a person is
+ * away only once all of their screens are.
+ *
  * Decided server-side rather than in the service worker because
  * `userVisibleOnly` obliges a subscription to show something for every message
  * it receives — a worker that routinely stays silent earns the browser's own
  * "site updated in the background" notice. Not sending is the only clean
  * suppression.
  */
-const activeViewers = new Map<string, { sessionId: string; at: number }>();
+const activeViewers = new Map<string, { ownerKey: string; sessionId: string; at: number }>();
+
+/** Key for one screen of one participant. A client that reports no viewer id
+ *  gets a single shared slot, which is exactly the old behaviour. */
+function viewerSlot(ownerKey: string, viewerId?: string | null): string {
+  return `${ownerKey}\u0000${viewerId || "-"}`;
+}
 
 export interface MuteRecord {
   /** "host" | `peer:<shareId>` */
@@ -188,12 +221,17 @@ function persist(): void {
 }
 
 /**
- * Load host state and discard every peer trace from the previous run.
+ * Load host state and discard every per-run trace from the previous run.
  *
  * Peer rows are dropped rather than validated because there is nothing left to
  * validate against: bootShares() has already cleared the share registry, so no
  * peer subscription can still be authorised. Keeping them would leave endpoints
  * we would happily deliver session content to, owned by nobody.
+ *
+ * A host DEVICE row goes for the same reason. Its subscription was minted on the
+ * tunnel origin, which is gone, and bootHostDevices() has already cleared the
+ * device registry — so it is a subscription owned by nobody too. Only the host at
+ * the machine survives a restart, because localhost:7842 is a stable origin.
  */
 export function bootPush(): void {
   if (_loaded) return;
@@ -208,7 +246,8 @@ export function bootPush(): void {
       for (const s of parsed.subscriptions ?? []) {
         if (!s || typeof s.endpoint !== "string" || !s.endpoint) continue;
         if (s.ownerKind !== "host") { droppedSubs++; continue; }
-        subscriptions.set(s.endpoint, { ...s, ownerKind: "host", shareId: null, sessionId: null } as PushSubscriptionRecord);
+        if (s.deviceId) { droppedSubs++; continue; }
+        subscriptions.set(s.endpoint, { ...s, ownerKind: "host", shareId: null, sessionId: null, deviceId: null } as PushSubscriptionRecord);
       }
       let droppedMutes = 0;
       for (const m of parsed.mutes ?? []) {
@@ -218,7 +257,7 @@ export function bootPush(): void {
         mutes.set(muteKey(m.ownerKey, m.sessionId ?? null), m);
       }
       if (droppedSubs || droppedMutes) {
-        log.info("push", "discarded peer state from previous run (shares are per-run)", { droppedSubs, droppedMutes });
+        log.info("push", "discarded per-run state from previous run (shares and devices are per-run)", { droppedSubs, droppedMutes });
       }
     } catch (err) {
       log.warn("push", "unreadable push.json — starting empty", { err: String(err) });
@@ -232,6 +271,10 @@ export function bootPush(): void {
   if (!_wired) {
     _wired = true;
     onSharesRevoked((shareIds) => { dropSubscriptionsForShares(shareIds); });
+    // Same hook for the host's own enrolled devices: revoking a phone has to take
+    // its notifications with it, or the screen we just cut off keeps being handed
+    // message bodies.
+    onHostDevicesRevoked((deviceIds) => { dropSubscriptionsForDevices(deviceIds); });
   }
 
   persist();
@@ -284,6 +327,8 @@ export function addSubscription(opts: {
   sessionId: string | null;
   displayName: string | null;
   capability: ShareCapability | null;
+  /** Host only: the enrolled device this subscription belongs to, if any. */
+  deviceId?: string | null;
   endpoint: string;
   keys: { p256dh: string; auth: string };
 }): PushSubscriptionRecord {
@@ -308,6 +353,7 @@ export function addSubscription(opts: {
     sessionId: opts.ownerKind === "peer" ? opts.sessionId : null,
     displayName: opts.displayName,
     capability: opts.ownerKind === "peer" ? opts.capability : null,
+    deviceId: opts.ownerKind === "host" ? opts.deviceId ?? null : null,
     endpoint: opts.endpoint,
     keys: opts.keys,
     createdAt: existing?.createdAt ?? Date.now(),
@@ -340,11 +386,47 @@ export function removeSubscription(endpoint: string, ownerKey: string): { ok: bo
  * a participant can only ever assert their own presence. Not persisted — this
  * is ephemeral and worthless across a restart.
  */
-export function setParticipantActive(ownerKey: string, sessionId: string | null): { ok: boolean } {
+export function setParticipantActive(
+  ownerKey: string,
+  sessionId: string | null,
+  viewerId?: string | null,
+): { ok: boolean } {
   bootPush();
-  if (sessionId) activeViewers.set(ownerKey, { sessionId: resolveCanonical(sessionId), at: Date.now() });
-  else activeViewers.delete(ownerKey);
+  const slot = viewerSlot(ownerKey, viewerId);
+  if (sessionId) {
+    activeViewers.set(slot, { ownerKey, sessionId: resolveCanonical(sessionId), at: Date.now() });
+  } else {
+    // Only THIS screen goes away. The participant is still watching from
+    // anywhere else that is still beating.
+    activeViewers.delete(slot);
+  }
   return { ok: true };
+}
+
+/**
+ * Drop every subscription belonging to any of these enrolled devices. The exact
+ * counterpart of dropSubscriptionsForShares, wired the same way (a revocation
+ * listener rather than a direct call), so every path that kills a device — one
+ * revoke, revoke-all, tunnel down, shutdown — cleans up by construction.
+ *
+ * Mutes are NOT touched: they are keyed "host" and belong to the person, not the
+ * screen. Losing your phone should not un-mute the sessions you silenced.
+ */
+export function dropSubscriptionsForDevices(deviceIds: readonly string[]): { dropped: number } {
+  bootPush();
+  const wanted = new Set(deviceIds);
+  let dropped = 0;
+  for (const [endpoint, r] of subscriptions) {
+    if (r.ownerKind === "host" && r.deviceId && wanted.has(r.deviceId)) {
+      subscriptions.delete(endpoint);
+      dropped++;
+    }
+  }
+  if (dropped > 0) {
+    log.info("push", "dropped subscriptions for revoked devices", { dropped });
+    persist();
+  }
+  return { dropped };
 }
 
 /** Drop every subscription authorised by any of these shares. */
@@ -426,10 +508,16 @@ function requiresAdmitRights(category: NotifyCategory): boolean {
  * network stops beating and is "away" within PRESENCE_TTL_MS.
  */
 function isWatching(ownerKey: string, sessionId: string): boolean {
-  const seen = activeViewers.get(ownerKey);
-  if (!seen) return false;
-  if (Date.now() - seen.at > PRESENCE_TTL_MS) return false;
-  return seen.sessionId === resolveCanonical(sessionId);
+  const canonical = resolveCanonical(sessionId);
+  const now = Date.now();
+  // ANY of their screens counts. Scanning is fine: this map holds one entry per
+  // open tab in the session, which is single digits.
+  for (const seen of activeViewers.values()) {
+    if (seen.ownerKey !== ownerKey) continue;
+    if (now - seen.at > PRESENCE_TTL_MS) continue;
+    if (seen.sessionId === canonical) return true;
+  }
+  return false;
 }
 
 function mayReceive(r: PushSubscriptionRecord, category: NotifyCategory, sessionId: string): boolean {

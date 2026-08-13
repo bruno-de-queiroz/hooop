@@ -509,3 +509,178 @@ describe("proxy — peer (share) path", () => {
     expect(res.status).toBe(401);
   });
 });
+
+/** A request arriving on the tunnel host carrying an enrolled DEVICE cookie. */
+function deviceReq(opts: {
+  method?: string;
+  pathname?: string;
+  cookie?: string;          // raw cookie header
+  dashboardHeader?: string; // x-dashboard-token (double-submit)
+  host?: string;
+  extraHeaders?: Record<string, string>;
+}): NextRequest {
+  const host = opts.host ?? TUNNEL_HOST;
+  const headers: Record<string, string> = {
+    host,
+    origin: `https://${host}`,
+    ...(opts.cookie ? { cookie: opts.cookie } : {}),
+    ...(opts.dashboardHeader ? { "x-dashboard-token": opts.dashboardHeader } : {}),
+    ...(opts.extraHeaders ?? {}),
+  };
+  return new NextRequest(`https://${host}${opts.pathname ?? "/api/sessions"}`, {
+    method: opts.method ?? "GET",
+    headers,
+  });
+}
+
+async function mkDeviceToken(
+  over: Partial<import("./lib/peer-token").HostDeviceTokenPayload> = {},
+): Promise<string> {
+  return peerToken.signHostDeviceToken(
+    { did: "device-1", host: TUNNEL_HOST, ...over },
+    PEER_SECRET,
+  );
+}
+
+describe("proxy — enrolled host device path", () => {
+  it("a valid device token on the bound host resolves to the HOST, not a peer", async () => {
+    const t = await mkDeviceToken();
+    const res = await mod.proxy(deviceReq({ pathname: "/api/sessions", cookie: `hooop_host_device=${t}` }));
+    expect(res.status).toBe(200);
+    // `host:<deviceId>` — the identity is the host, and the id is what the
+    // sandbox re-validates against its device registry.
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBe("host:device-1");
+    // A device is NOT pinned to one session the way a peer is.
+    expect(res.headers.get("x-middleware-request-x-hooop-peer-session")).toBeNull();
+  });
+
+  it("never hands a device the install cookie", async () => {
+    // The whole reason a device gets its own revocable credential: the install
+    // token must not leave the machine, even to its owner's phone.
+    const t = await mkDeviceToken();
+    const res = await mod.proxy(deviceReq({ pathname: "/", cookie: `hooop_host_device=${t}` }));
+    expect(res.headers.get("set-cookie") ?? "").not.toContain("hooop_token=");
+  });
+
+  it("device token bound to a DIFFERENT host is rejected (dies with the tunnel)", async () => {
+    const t = await mkDeviceToken({ host: "other.trycloudflare.com" });
+    const res = await mod.proxy(deviceReq({ pathname: "/api/sessions", cookie: `hooop_host_device=${t}` }));
+    expect(res.status).toBe(401);
+  });
+
+  it("expired device token rejected", async () => {
+    const t = await mkDeviceToken({ exp: Date.now() - 1000 });
+    const res = await mod.proxy(deviceReq({ pathname: "/api/sessions", cookie: `hooop_host_device=${t}` }));
+    expect(res.status).toBe(401);
+  });
+
+  it("a PEER token in the device cookie proves nothing (domain separation)", async () => {
+    // Both kinds are signed with the same secret, so the only thing stopping a
+    // guest from promoting their own cookie is the `kind` claim.
+    const peerTok = await mkPeerToken();
+    const res = await mod.proxy(deviceReq({ pathname: "/api/sessions", cookie: `hooop_host_device=${peerTok}` }));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBeNull();
+  });
+
+  it("a DEVICE token in the peer cookie is not a peer either (the other direction)", async () => {
+    const t = await mkDeviceToken();
+    const res = await mod.proxy(peerReq({ pathname: "/api/sessions", cookieToken: t }));
+    expect(res.status).toBe(401);
+  });
+
+  it("a device cannot forge the participant header to name another device", async () => {
+    const t = await mkDeviceToken({ did: "device-1" });
+    const res = await mod.proxy(deviceReq({
+      pathname: "/api/sessions",
+      cookie: `hooop_host_device=${t}`,
+      extraHeaders: { "x-hooop-participant": "host" }, // try to shed the revocable id
+    }));
+    expect(res.status).toBe(200);
+    // Re-derived from the verified token: a device can never launder itself into
+    // the un-revocable bare "host".
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBe("host:device-1");
+  });
+
+  it("device mutation requires the double-submit header equal to the device cookie", async () => {
+    const t = await mkDeviceToken();
+    const noHeader = await mod.proxy(deviceReq({
+      method: "POST", pathname: "/api/sessions/sess-1/message", cookie: `hooop_host_device=${t}`,
+    }));
+    expect(noHeader.status).toBe(401);
+
+    const wrongHeader = await mod.proxy(deviceReq({
+      method: "POST", pathname: "/api/sessions/sess-1/message",
+      cookie: `hooop_host_device=${t}`, dashboardHeader: `${t}x`,
+    }));
+    expect(wrongHeader.status).toBe(401);
+
+    const ok = await mod.proxy(deviceReq({
+      method: "POST", pathname: "/api/sessions/sess-1/message",
+      cookie: `hooop_host_device=${t}`, dashboardHeader: t,
+    }));
+    expect(ok.status).toBe(200);
+  });
+
+  it("a device does NOT get the install token as its double-submit value", async () => {
+    // Belt and braces on the layout's rule: presenting the install token with a
+    // device cookie must not satisfy the check, or the phone would need a copy
+    // of the very secret this feature exists to avoid copying.
+    const t = await mkDeviceToken();
+    const res = await mod.proxy(deviceReq({
+      method: "POST", pathname: "/api/sessions/sess-1/message",
+      cookie: `hooop_host_device=${t}`, dashboardHeader: token,
+    }));
+    expect(res.status).toBe(401);
+  });
+
+  it("the device cookie outranks a peer cookie held by the same browser", async () => {
+    // Enrolling your phone after having paired it into a session should promote
+    // it, not leave it pinned to that one session as a guest.
+    const dev = await mkDeviceToken();
+    const peer = await mkPeerToken();
+    const res = await mod.proxy(deviceReq({
+      pathname: "/api/sessions",
+      cookie: `hooop_peer=${peer}; hooop_host_device=${dev}`,
+    }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBe("host:device-1");
+  });
+
+  it("a dead device cookie falls back to a still-valid peer cookie", async () => {
+    // Losing host authority should not also cost you the guest access you
+    // legitimately still hold.
+    const dev = await mkDeviceToken({ exp: Date.now() - 1000 });
+    const peer = await mkPeerToken();
+    const res = await mod.proxy(deviceReq({
+      pathname: "/api/sessions",
+      cookie: `hooop_peer=${peer}; hooop_host_device=${dev}`,
+    }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBe("peer:share-1");
+  });
+
+  it("enrollment endpoints are reachable without a cookie", async () => {
+    // The phone being enrolled holds nothing yet — that is the problem being
+    // solved — so both halves must be reachable pre-credential.
+    const page = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/enroll`, {
+      method: "GET", headers: { host: TUNNEL_HOST },
+    }));
+    expect(page.status).toBe(200);
+    const post = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/api/host-device/enroll`, {
+      method: "POST",
+      headers: { host: TUNNEL_HOST, origin: `https://${TUNNEL_HOST}`, "content-type": "application/json" },
+    }));
+    expect(post.status).toBe(200); // passthrough; the route itself validates
+  });
+
+  it("the code-minting endpoint is NOT reachable from the tunnel without a credential", async () => {
+    // Only /api/host-device/enroll is pre-auth. Minting a code is host-only, so a
+    // cookieless tunnel request must die on the ordinary rebinding defence.
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/api/host-device/code`, {
+      method: "POST",
+      headers: { host: TUNNEL_HOST, origin: `https://${TUNNEL_HOST}`, "content-type": "application/json" },
+    }));
+    expect(res.status).toBe(403);
+  });
+});

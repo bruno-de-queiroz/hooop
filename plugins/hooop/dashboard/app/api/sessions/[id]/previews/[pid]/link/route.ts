@@ -49,7 +49,22 @@ export async function GET(
   if (!preview) return errorResponse("unknown preview", 404);
 
   const who = participantOf(req);
-  const isHost = who.kind === "host";
+  // "The host" here means specifically the host AT THE MACHINE, because every
+  // decision below turns on whether a loopback-ish slot port is reachable — not on
+  // who the viewer is.
+  //
+  // An enrolled device is the host in authority and a remote viewer in geography.
+  // It reached us on the tunnel hostname, where only the dashboard's one port is
+  // forwarded, so `https://<tunnel>:<slotPort>` is not a private URL that happens
+  // to be inconvenient — it is nothing at all. Treating a device like the local
+  // host would frame a dead address and report "refused to connect" on the phone
+  // of the person who started the preview. So it takes the same route a peer does:
+  // the public tunnel URL, or the honest 409 when the preview has not been shared.
+  // The enrolled device this request came from, if any. Pulled out here so the
+  // two decisions below (which URL to frame, and what the grant re-checks) read
+  // off one narrowed value.
+  const viewerDeviceId = who.kind === "host" ? who.deviceId ?? null : null;
+  const isLocalHost = who.kind === "host" && !viewerDeviceId;
 
   // A peer can only be sent to the tunnel hostname; a loopback port is
   // meaningless from another machine. Conversely the host does not need a
@@ -105,7 +120,7 @@ export async function GET(
   // Suffix List, so those are separate sites by definition. Their iframe is
   // unavoidably third-party, which is why the cookie is issued with
   // `SameSite=None; Secure; Partitioned` for HTTPS viewers (see server.mjs).
-  const frameTarget = isHost ? localTarget : preview.publicUrl;
+  const frameTarget = isLocalHost ? localTarget : preview.publicUrl;
   if (!frameTarget) {
     return errorResponse(
       "this preview has not been shared yet, so it is only reachable by the host",
@@ -121,7 +136,17 @@ export async function GET(
       {
         pv: preview.previewId,
         ses: preview.sessionId,
-        sid: who.kind === "peer" ? who.shareId : "host",
+        // What the front process will re-check on every request. A peer names
+        // their share; an enrolled device names ITSELF (`host:<deviceId>`), so
+        // revoking the device cuts its preview within seconds like everything
+        // else it holds. Only the host at the machine gets the bare "host", which
+        // has nothing to re-check because their authority is the install cookie
+        // rather than a grant.
+        sid: who.kind === "peer"
+          ? who.shareId
+          : viewerDeviceId
+            ? `host:${viewerDeviceId}`
+            : "host",
         host: normalizePreviewHost(new URL(target).host),
         exp: Date.now() + PREVIEW_TOKEN_TTL_MS,
       },

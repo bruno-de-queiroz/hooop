@@ -9,7 +9,15 @@ import {
   TOKEN_COOKIE,
   TOKEN_HEADER,
 } from "@/lib/auth-edge";
-import { PEER_COOKIE, peerSigningSecret, verifyPeerToken, type PeerTokenPayload } from "@/lib/peer-token";
+import {
+  PEER_COOKIE,
+  HOST_DEVICE_COOKIE,
+  peerSigningSecret,
+  verifyPeerToken,
+  verifyHostDeviceToken,
+  type PeerTokenPayload,
+  type HostDeviceTokenPayload,
+} from "@/lib/peer-token";
 import { mutatingRequestLimiter } from "@/lib/rate-limit";
 
 const ONE_YEAR_SECONDS = 60 * 60 * 24 * 365;
@@ -80,12 +88,21 @@ export async function proxy(req: NextRequest) {
   // pending-cookie secret; join-status is a coarse poll). The /join/* page is a
   // client shell that reads the fragment token — it must render without (and
   // must NOT receive) the install cookie, since it's served on the tunnel host.
+  //
+  // The device-enrollment pair is here for the same reason and with the same
+  // shape: a phone redeeming an enrollment code holds no credential yet (that is
+  // the problem being solved), so /enroll must render and its POST must be
+  // reachable without one. The POST is self-validating — it needs a live,
+  // single-use code minted by the host for THIS tunnel host — and it is IP rate
+  // limited, because unlike the peer flow there is no second gate behind it.
   if (
     pathname === "/api/share/redeem" ||
     pathname === "/api/share/join-status" ||
     pathname === "/api/share/claim" ||
+    pathname === "/api/host-device/enroll" ||
     pathname.startsWith("/join/") ||
-    pathname === "/join"
+    pathname === "/join" ||
+    pathname === "/enroll"
   ) {
     return passthrough(req, rid, "none");
   }
@@ -102,6 +119,19 @@ export async function proxy(req: NextRequest) {
 async function authorizePage(req: NextRequest, rid: string): Promise<NextResponse> {
   const host = req.headers.get("host");
   const expected = dashboardTokenFromEnv();
+
+  // Enrolled-device path, checked BEFORE the peer path. A browser can hold both
+  // cookies (you paired yourself into a session, then later enrolled the same
+  // phone as a device), and when it does, the device wins: it is the stronger
+  // claim, it is the more recent deliberate act, and being pinned to one session
+  // as a guest is not what somebody who just enrolled their own phone asked for.
+  const device = await resolveHostDevice(req);
+  if (device && !isAllowedHost(host)) {
+    // Emphatically NOT the install cookie — the device authenticates with its own
+    // revocable token, so a stolen phone costs you that device and not the
+    // install. Everything else about being the host is identical.
+    return passthrough(req, rid, `host:${device.did}`);
+  }
 
   // Peer path: a verified peer cookie bound to this (tunnel) host.
   const peer = await resolvePeer(req);
@@ -187,13 +217,43 @@ async function authorizeApi(req: NextRequest, rid: string): Promise<NextResponse
     return jsonError(401, "missing or invalid auth cookie", rid);
   }
 
-  // ── Peer path — non-allowed (tunnel) host + signed peer token ─────────────
-  // Preserve the DNS-rebinding defence: a disallowed host with NO peer cookie
-  // is rejected exactly as before (403 host not allowed). Only a request that
-  // actually carries a peer cookie gets the peer-validation path.
+  // ── Peer / device path — non-allowed (tunnel) host + a signed token ───────
+  // Preserve the DNS-rebinding defence: a disallowed host with NO credential
+  // cookie is rejected exactly as before (403 host not allowed). Only a request
+  // that actually carries one gets a validation path.
   const hasPeerCookie = !!req.cookies.get(PEER_COOKIE)?.value;
-  if (!hasPeerCookie) {
+  const deviceCookie = req.cookies.get(HOST_DEVICE_COOKIE)?.value ?? "";
+  if (!hasPeerCookie && !deviceCookie) {
     return jsonError(403, "host not allowed", rid);
+  }
+
+  // Enrolled device first (see authorizePage for why it outranks a peer cookie).
+  // A device cookie that fails validation is not fatal on its own: if this
+  // browser also holds a peer cookie, it falls through and is served as the guest
+  // it still legitimately is. Only a browser with nothing else is rejected.
+  if (deviceCookie) {
+    const device = await resolveHostDevice(req);
+    if (device) {
+      if (!isSameOrigin(req)) {
+        return jsonError(403, "cross-origin requests are not allowed", rid);
+      }
+      if (!SAFE_METHODS.has(req.method)) {
+        const rate = mutatingRequestLimiter.check(deviceCookie);
+        if (!rate.ok) return rateLimited(rid, rate.resetSec);
+        // Same double-submit rule as the peer path, against the DEVICE cookie:
+        // the header must equal it, so a hostile page that cannot read an
+        // HttpOnly cookie cannot ride along on it. Constant-time, since the
+        // cookie is a signed secret.
+        const headerToken = req.headers.get(TOKEN_HEADER);
+        if (!headerToken || !constantTimeEqualsJs(headerToken, deviceCookie)) {
+          return jsonError(401, "mutating requests require " + TOKEN_HEADER + " header", rid);
+        }
+      }
+      return passthrough(req, rid, `host:${device.did}`);
+    }
+    if (!hasPeerCookie) {
+      return jsonError(401, "missing or invalid auth", rid);
+    }
   }
   const peer = await resolvePeer(req);
   if (!peer) {
@@ -216,6 +276,28 @@ async function authorizeApi(req: NextRequest, rid: string): Promise<NextResponse
     }
   }
   return passthrough(req, rid, `peer:${peer.sid}`, peer.ses, peer.cap);
+}
+
+/**
+ * Verify the host-device cookie's signature and bind it to the request Host.
+ * Returns the payload only when the token is valid, unexpired, host-bound, and
+ * actually a DEVICE token (verifyHostDeviceToken requires `kind:"host"`, so a
+ * peer token dropped into this cookie by hand resolves to nothing).
+ *
+ * Revocation is NOT checked here, deliberately and by the same design as the peer
+ * path: middleware runs on the edge with no way to reach the sandbox, so it
+ * proves issuance and the sandbox proves currency on every forwarded call. A
+ * revoked device can still render the shell for a moment; it cannot do anything.
+ */
+async function resolveHostDevice(req: NextRequest): Promise<HostDeviceTokenPayload | null> {
+  const secret = peerSigningSecret();
+  if (!secret) return null;
+  const cookie = req.cookies.get(HOST_DEVICE_COOKIE)?.value;
+  if (!cookie) return null;
+  const payload = await verifyHostDeviceToken(cookie, secret);
+  if (!payload) return null;
+  if (normalizeHostHeader(req.headers.get("host")) !== payload.host) return null;
+  return payload;
 }
 
 /** Verify the peer cookie's signature and bind it to the request Host. Returns

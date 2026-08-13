@@ -12,6 +12,10 @@
  */
 
 export interface PeerTokenPayload {
+  /** Token kind. Absent means "peer" (every peer token ever signed omits it).
+   * Present and "host" means a HOST DEVICE token, which must never be accepted
+   * on a peer code path — see verifyPeerToken. */
+  kind?: "host";
   /** Share id — the sandbox's revocation key. */
   sid: string;
   /** Canonical session id this grant co-drives. */
@@ -61,7 +65,7 @@ function timingSafeEqualBytes(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
-export async function signPeerToken(payload: PeerTokenPayload, secret: string): Promise<string> {
+async function signPayload(payload: object, secret: string): Promise<string> {
   const json = JSON.stringify(payload);
   const payloadB64 = toBase64Url(enc.encode(json));
   const key = await hmacKey(secret);
@@ -70,11 +74,11 @@ export async function signPeerToken(payload: PeerTokenPayload, secret: string): 
 }
 
 /**
- * Verify signature + expiry and return the payload, or null if invalid. Does
- * NOT check revocation or host — callers enforce host (`payload.host === Host`)
- * and the sandbox enforces revocation by `sid`.
+ * Verify the signature and return the raw payload, or null. Shared by both token
+ * kinds — the CALLER is responsible for checking `kind`, because a valid
+ * signature only proves we issued the thing, not what it was issued for.
  */
-export async function verifyPeerToken(token: string, secret: string): Promise<PeerTokenPayload | null> {
+async function verifySigned(token: string, secret: string): Promise<Record<string, unknown> | null> {
   if (!token || !secret) return null;
   const dot = token.indexOf(".");
   if (dot <= 0 || dot === token.length - 1) return null;
@@ -95,14 +99,88 @@ export async function verifyPeerToken(token: string, secret: string): Promise<Pe
   }
   if (!timingSafeEqualBytes(providedSig, expectedSig)) return null;
 
-  let payload: PeerTokenPayload;
+  let payload: Record<string, unknown>;
   try {
     payload = JSON.parse(dec.decode(fromBase64Url(payloadB64)));
   } catch {
     return null;
   }
-  if (payload.exp && Date.now() > payload.exp) return null;
-  return payload;
+  if (payload && typeof payload === "object") return payload;
+  return null;
+}
+
+export async function signPeerToken(payload: PeerTokenPayload, secret: string): Promise<string> {
+  return signPayload(payload, secret);
+}
+
+/**
+ * Verify signature + expiry and return the payload, or null if invalid. Does
+ * NOT check revocation or host — callers enforce host (`payload.host === Host`)
+ * and the sandbox enforces revocation by `sid`.
+ */
+export async function verifyPeerToken(token: string, secret: string): Promise<PeerTokenPayload | null> {
+  const payload = await verifySigned(token, secret);
+  if (!payload) return null;
+  // DOMAIN SEPARATION. Both kinds are signed with the same secret, so a valid
+  // signature is not an answer to "what is this?". A host device token presented
+  // as a peer cookie must not resolve to a peer (it has no share to scope
+  // against, so it would be a peer bound to nothing), and more importantly the
+  // reverse must not happen — see verifyHostDeviceToken. Rejecting the wrong
+  // kind on BOTH sides means neither can ever be replayed as the other.
+  if (payload.kind === "host") return null;
+  if (typeof payload.sid !== "string" || typeof payload.ses !== "string") return null;
+  const exp = payload.exp;
+  if (typeof exp === "number" && exp && Date.now() > exp) return null;
+  return payload as unknown as PeerTokenPayload;
+}
+
+/**
+ * A host device token: the credential a phone or tablet holds so it can be the
+ * HOST over the public tunnel rather than a guest with a nickname.
+ *
+ * Claims deliberately do NOT include a session or a capability. A device is not
+ * scoped to one session and has no capability ceiling — the chosen model is
+ * "full host, revocable per device" — so there is nothing to put there, and an
+ * empty `cap` field would only invite somebody to start trusting it.
+ */
+export interface HostDeviceTokenPayload {
+  kind: "host";
+  /** Device id — the sandbox's revocation key. */
+  did: string;
+  /** Bare hostname the device must present (the tunnel host). */
+  host: string;
+  /** Expiry, epoch ms; 0/absent = no expiry. */
+  exp?: number;
+}
+
+export async function signHostDeviceToken(
+  payload: Omit<HostDeviceTokenPayload, "kind">,
+  secret: string,
+): Promise<string> {
+  return signPayload({ kind: "host", ...payload }, secret);
+}
+
+/**
+ * Verify signature + expiry and return the device payload, or null. Requires
+ * `kind === "host"`, so a peer token (which never carries `kind`) can never come
+ * back from here — the difference between "a guest of this session" and "the
+ * operator of this machine" must not rest on a field being absent.
+ *
+ * Does NOT check revocation or host: callers enforce host (`payload.host ===
+ * Host`) and the sandbox enforces revocation by `did`.
+ */
+export async function verifyHostDeviceToken(
+  token: string,
+  secret: string,
+): Promise<HostDeviceTokenPayload | null> {
+  const payload = await verifySigned(token, secret);
+  if (!payload) return null;
+  if (payload.kind !== "host") return null;
+  if (typeof payload.did !== "string" || !payload.did) return null;
+  if (typeof payload.host !== "string" || !payload.host) return null;
+  const exp = payload.exp;
+  if (typeof exp === "number" && exp && Date.now() > exp) return null;
+  return payload as unknown as HostDeviceTokenPayload;
 }
 
 export const PEER_COOKIE = "hooop_peer";
@@ -112,6 +190,13 @@ export const PEER_COOKIE = "hooop_peer";
  * only the party that redeemed can claim the ticket once the host admits.
  * Swapped for {@link PEER_COOKIE} by the claim step; never grants app access. */
 export const PEER_PENDING_COOKIE = "hooop_pending";
+
+/** The durable cookie an enrolled host device holds on the tunnel host. Separate
+ * from {@link PEER_COOKIE} so the two credentials can never be confused by a
+ * cookie read: a browser may legitimately hold both (you paired yourself into a
+ * session before enrolling the same phone), and which one it is decides whether
+ * the viewer is the operator or a guest. */
+export const HOST_DEVICE_COOKIE = "hooop_host_device";
 
 /** Read the dashboard's peer-token signing secret (set by the launcher). */
 export function peerSigningSecret(): string | null {

@@ -253,7 +253,15 @@ describe("/push — presence relay", () => {
   it("records the caller under their own owner key, never one they choose", async () => {
     await doRequest(srv.socketPath, "POST", "/push/presence", srv.token,
       { sessionId: "sess-peer", active: true }, "peer:share-1");
-    expect(setParticipantActive).toHaveBeenCalledWith("peer:share-1", "sess-peer");
+    expect(setParticipantActive).toHaveBeenCalledWith("peer:share-1", "sess-peer", null);
+  });
+
+  it("passes the viewer id through so one person's screens don't cancel each other", async () => {
+    // The whole point: a beat names the SCREEN it came from, so pocketing the
+    // phone clears the phone rather than the laptop in front of you.
+    await doRequest(srv.socketPath, "POST", "/push/presence", srv.token,
+      { sessionId: "sess-host", active: true, viewerId: "tab-a" });
+    expect(setParticipantActive).toHaveBeenCalledWith("host", "sess-host", "tab-a");
   });
 
   it("clears presence when the tab reports itself inactive", async () => {
@@ -261,12 +269,12 @@ describe("/push — presence relay", () => {
     // resume the instant someone backgrounds the tab.
     await doRequest(srv.socketPath, "POST", "/push/presence", srv.token,
       { sessionId: "sess-host", active: false });
-    expect(setParticipantActive).toHaveBeenCalledWith("host", null);
+    expect(setParticipantActive).toHaveBeenCalledWith("host", null, null);
   });
 
   it("treats an absent active flag as present, matching the presence route", async () => {
     await doRequest(srv.socketPath, "POST", "/push/presence", srv.token, { sessionId: "sess-host" });
-    expect(setParticipantActive).toHaveBeenCalledWith("host", "sess-host");
+    expect(setParticipantActive).toHaveBeenCalledWith("host", "sess-host", null);
   });
 
   it("requires a session id", async () => {

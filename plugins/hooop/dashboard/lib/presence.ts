@@ -14,6 +14,24 @@ import { deriveHandles } from "@shared/handles";
 
 export interface PresenceEntry {
   participantId: string;        // "host" or a share id
+  /**
+   * Which SCREEN this beat came from — one browser tab, not one person.
+   *
+   * The roster is a list of people, but the thing that beats is a tab, and one
+   * person now routinely has several: the host on their laptop and their phone
+   * (an enrolled device beats as `host` from both), a peer who re-opened their
+   * link on a second device (same share id, so the same participantId), or
+   * simply somebody with two tabs open. Keyed by participantId alone, those
+   * collapsed into one slot and fought: the backgrounded phone reported
+   * `active:false` and dimmed the laptop, and each tab's `typing:false`
+   * cancelled the other's `typing:true`.
+   *
+   * So entries are stored per viewer and AGGREGATED into one roster row per
+   * participantId (see listPresence). Identity stays exactly as coarse as it was
+   * — one person, one row, one `@handle` — while liveness gets counted per
+   * screen, which is where it actually happens.
+   */
+  viewerId: string;
   name: string;
   kind: "host" | "peer";
   typing: boolean;
@@ -32,8 +50,22 @@ export interface PresenceEntry {
 
 interface PresenceState {
   bus: EventEmitter;
-  // sessionId -> participantId -> entry
+  // sessionId -> viewerKey -> entry, where viewerKey is participantId + viewerId
+  // (see viewerKey below). One entry per screen; one ROSTER ROW per participant.
   bySession: Map<string, Map<string, PresenceEntry>>;
+}
+
+/** Single-screen fallback for a client that doesn't report a viewer id. Behaves
+ *  exactly like the old one-entry-per-participant registry did, so an older tab
+ *  still shows up (it just can't be told apart from another of its own). */
+const DEFAULT_VIEWER = "-";
+
+/** Map key. The separator is a NUL so it can't occur in either half — a share id
+ *  is a uuid and a viewer id is random hex, but a key scheme that only works
+ *  because of what today's inputs happen to look like is a bug waiting for a
+ *  rename. */
+function viewerKey(participantId: string, viewerId: string): string {
+  return `${participantId}\u0000${viewerId}`;
 }
 
 // A peer whose heartbeat hasn't been seen for this long (or who has reported
@@ -78,10 +110,14 @@ function evictStale(map: Map<string, PresenceEntry>): void {
   }
 }
 
-/** Record/refresh a participant's presence on a session and notify listeners. */
+/** Record/refresh ONE SCREEN's presence on a session and notify listeners. Other
+ *  screens belonging to the same participant are left alone — that is the point
+ *  (see PresenceEntry.viewerId). */
 export function heartbeat(opts: {
   sessionId: string;
   participantId: string;
+  /** This tab. Absent → a single shared slot, i.e. the old behaviour. */
+  viewerId?: string;
   name: string;
   kind: "host" | "peer";
   typing?: boolean;
@@ -103,8 +139,10 @@ export function heartbeat(opts: {
   // user is actively typing, so this stays fresh during a long burst and goes
   // stale within the TTL once assertions stop (idle, tab backgrounded, dropped
   // request) — see listPresence.
-  map.set(opts.participantId, {
+  const viewerId = opts.viewerId || DEFAULT_VIEWER;
+  map.set(viewerKey(opts.participantId, viewerId), {
     participantId: opts.participantId,
+    viewerId,
     name: opts.name,
     kind: opts.kind,
     typing,
@@ -117,39 +155,106 @@ export function heartbeat(opts: {
 }
 
 /**
- * Explicitly drop a participant from the roster (e.g. tab close / navigate
- * away) and notify. This is a ROSTER-only operation — it never emits a "left"
- * marker. A durable "left" has exactly ONE source: the explicit "Leave session"
- * route, which emits its own marker immediately (and clears the peer's cookie).
- * A peer that merely closes a tab or backgrounds it just dims (away) and,
- * eventually, drops from the roster silently — no transcript marker.
+ * Explicitly drop ONE SCREEN from the roster (e.g. tab close / navigate away)
+ * and notify. This is a ROSTER-only operation — it never emits a "left" marker.
+ * A durable "left" has exactly ONE source: the explicit "Leave session" route,
+ * which emits its own marker immediately (and clears the peer's cookie). A peer
+ * that merely closes a tab or backgrounds it just dims (away) and, eventually,
+ * drops from the roster silently — no transcript marker.
+ *
+ * Returns `gone: true` only when that was the participant's LAST screen. Callers
+ * that announce a departure must gate on it: closing the tab on your phone while
+ * your laptop is still open is not leaving, and saying so in the transcript would
+ * be telling the room something untrue.
+ *
+ * Omitting `viewerId` drops every screen for that participant. That is the right
+ * default for a caller acting on the identity (a revoked share) rather than on a
+ * tab, and it is also what an older client that reports no viewer id gets.
  */
-export function leave(sessionId: string, participantId: string): void {
+export function leave(
+  sessionId: string,
+  participantId: string,
+  viewerId?: string,
+): { gone: boolean } {
   const s = state();
   const map = s.bySession.get(sessionId);
-  const removed = map?.delete(participantId) ?? false;
+  if (!map) return { gone: true };
+  let removed = false;
+  if (viewerId) {
+    removed = map.delete(viewerKey(participantId, viewerId));
+  } else {
+    for (const [key, e] of map) {
+      if (e.participantId === participantId) {
+        map.delete(key);
+        removed = true;
+      }
+    }
+  }
   if (removed) s.bus.emit("change", { sessionId });
+  // Count what's LEFT for this participant, after the removal and after evicting
+  // corpses — a dead tab that never beat again must not keep somebody's departure
+  // silent for the full eviction window.
+  evictStale(map);
+  let remaining = 0;
+  for (const e of map.values()) if (e.participantId === participantId) remaining++;
+  return { gone: remaining === 0 };
 }
 
-/** Current participants on a session, each tagged with `away` (dim the avatar:
- * the peer's tab is backgrounded or its heartbeat is stale, but it is NOT
- * gone). The `typing` flag is independently expired at TYPING_TTL_MS so a lost
- * `typing:false` can't leave an indicator stuck for the whole entry TTL. */
+/**
+ * Current PEOPLE on a session — one row per participant, whatever number of
+ * screens they are watching from.
+ *
+ * Each row is tagged with `away` (dim the avatar: every one of their tabs is
+ * backgrounded or stale, but they are NOT gone) and `viewers` (how many screens,
+ * so the UI can say "also on their phone"). The `typing` flag is independently
+ * expired at TYPING_TTL_MS so a lost `typing:false` can't leave an indicator
+ * stuck for the whole entry TTL.
+ *
+ * Aggregation is deliberately optimistic on liveness — typing if ANY screen is
+ * typing, present if ANY screen is present. The pessimistic reading would let a
+ * forgotten background tab speak for a person who is right there, which is the
+ * exact bug that made one shared slot per participant unworkable.
+ */
 export function listPresence(
   sessionId: string,
-): Array<PresenceEntry & { away: boolean; handle: string }> {
+): Array<Omit<PresenceEntry, "viewerId" | "typingSince"> & { away: boolean; handle: string; viewers: number }> {
   const map = state().bySession.get(sessionId);
   if (!map) return [];
   evictStale(map);
   const now = Date.now();
-  const rows = [...map.values()]
-    .map((e) => ({
-      ...e,
-      typing: e.typing && e.typingSince > 0 && now - e.typingSince <= TYPING_TTL_MS,
-      // Peers only: a backgrounded (inactive) or stale-heartbeat peer is shown
-      // dimmed. Hosts are never dimmed (their idleness isn't surfaced).
-      away: e.kind === "peer" && (!e.active || now - e.lastSeen > IDLE_MS),
-    }))
+
+  // Fold the per-screen entries into one row per participant.
+  const byParticipant = new Map<string, PresenceEntry[]>();
+  for (const e of map.values()) {
+    const list = byParticipant.get(e.participantId);
+    if (list) list.push(e);
+    else byParticipant.set(e.participantId, [e]);
+  }
+
+  const rows = [...byParticipant.entries()]
+    .map(([participantId, screens]) => {
+      // Freshest screen wins the display name. They should agree, but a tab left
+      // open from before a rename would otherwise get a vote on what somebody is
+      // called purely by being first in the map.
+      const freshest = screens.reduce((a, b) => (b.lastSeen > a.lastSeen ? b : a));
+      const lastSeen = Math.max(...screens.map((e) => e.lastSeen));
+      const typing = screens.some(
+        (e) => e.typing && e.typingSince > 0 && now - e.typingSince <= TYPING_TTL_MS,
+      );
+      const present = screens.some((e) => e.active && now - e.lastSeen <= IDLE_MS);
+      return {
+        participantId,
+        name: freshest.name,
+        kind: freshest.kind,
+        typing,
+        lastSeen,
+        active: screens.some((e) => e.active),
+        // Peers only: a peer with no live foreground screen is shown dimmed.
+        // Hosts are never dimmed (their idleness isn't surfaced).
+        away: freshest.kind === "peer" && !present,
+        viewers: screens.length,
+      };
+    })
     .sort((a, b) => a.participantId.localeCompare(b.participantId));
   // Derived AFTER the sort, never before: deriveHandles disambiguates
   // collisions positionally, so two participants with the same display name

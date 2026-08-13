@@ -90,6 +90,16 @@ import {
   type ShareCapability,
 } from "./lib/shares";
 import {
+  bootHostDevices,
+  createEnrollCode,
+  redeemEnrollCode,
+  listHostDevices,
+  revokeHostDevice,
+  revokeAllHostDevices,
+  validateHostDevice,
+  getHostDevice,
+} from "./lib/host-devices";
+import {
   vapidPublicKey,
   addSubscription,
   removeSubscription,
@@ -272,14 +282,47 @@ function getHeader(req: IncomingMessage, name: string): string | null {
 const PARTICIPANT_HEADER = "x-hooop-participant";
 
 /**
+ * Is this participant string the HOST, and is that claim still good?
+ *
+ * Two spellings, one identity:
+ *   - "host"            — the local operator, authenticated by HOSTNAME (the
+ *                         dashboard only mints the install cookie on the
+ *                         localhost allowlist). Nothing for us to re-check:
+ *                         the trust boundary is "already on this machine".
+ *   - "host:<deviceId>" — the SAME person on one of their own enrolled devices,
+ *                         reaching us over the public tunnel. This one we DO
+ *                         re-check, against the durable device registry, for
+ *                         exactly the reason we re-check shares: it is a
+ *                         revocable bearer grant that arrived from the
+ *                         internet, so the dashboard's signature check is the
+ *                         first gate and this is the authoritative one.
+ *
+ * Anything else (a peer, an unknown shape, an absent header) is not the host.
+ *
+ * The deviceId is deliberately NOT surfaced to callers as a distinct identity.
+ * An enrolled device IS the host — same participantId, same attribution, same
+ * powers — because the whole point of enrolling it was to stop being a
+ * second-class guest on your own session. The device only exists as a separate
+ * thing in one place: the list the host revokes from.
+ */
+function isHostParticipant(raw: string | null): boolean {
+  if (raw === "host") return true;
+  if (!raw || !raw.startsWith("host:")) return false;
+  const deviceId = raw.slice("host:".length);
+  if (!deviceId) return false;
+  return validateHostDevice(deviceId).ok;
+}
+
+/**
  * Authoritative peer-context guard for co-drive actions. The dashboard forwards
  * `x-hooop-participant` (already authenticated by the dashboard's signed-token
  * gate); this is the independent SECOND check that a compromised dashboard
  * cannot bypass — it re-validates the share against the sandbox's own durable
  * registry (revocation + session scope) and the capability for this action.
  *
- * Explicit "host" → allowed, author "host". Peer → validated; returns the
- * share's peerName as the author for attribution.
+ * Host ("host", or "host:<deviceId>" re-validated against the device registry)
+ * → allowed, author "host". Peer → validated; returns the share's peerName as
+ * the author for attribution.
  *
  * An ABSENT header is rejected, not treated as host. It used to mean host,
  * which made the identity of every guarded route depend on a header the
@@ -295,8 +338,12 @@ function checkParticipant(
   action: "turn" | "bash" | "permission" | "admit",
 ): { ok: true; author: string; isPeer: boolean; shareId: string | null; capability: ShareCapability | null } | { ok: false; status: number; reason: string } {
   const raw = getHeader(req, PARTICIPANT_HEADER);
-  if (raw === "host") return { ok: true, author: "host", isPeer: false, shareId: null, capability: null };
+  if (isHostParticipant(raw)) return { ok: true, author: "host", isPeer: false, shareId: null, capability: null };
   if (!raw) return { ok: false, status: 403, reason: "missing participant" };
+  // A `host:<id>` that got here failed validation above — say so rather than
+  // falling through to the catch-all "invalid participant", which would read as
+  // a malformed header when the real story is a revoked or expired device.
+  if (raw.startsWith("host:")) return { ok: false, status: 403, reason: "device revoked or expired" };
   if (raw.startsWith("peer:")) {
     const shareId = raw.slice("peer:".length);
     // Liveness only here (not revoked/expired); session scope is checked
@@ -330,7 +377,8 @@ function checkParticipant(
  * these with isHost(), but the proxy still forwards the authenticated
  * `x-hooop-participant`, so if that route guard ever regresses a peer-forwarded
  * request is rejected HERE too — a compromised/buggy dashboard can't spawn work
- * as a peer. Explicit "host" → allowed; a peer, an unknown format, or an ABSENT
+ * as a peer. Host (including a validated `host:<deviceId>`) → allowed; a peer,
+ * a dead device, an unknown format, or an ABSENT
  * header → 403. Writes the error response and returns false so callers can
  * `if (!requireHost(req, res)) return;`.
  *
@@ -341,7 +389,7 @@ function checkParticipant(
  * anyone who could reach the socket and say nothing.
  */
 function requireHost(req: IncomingMessage, res: ServerResponse): boolean {
-  if (getHeader(req, PARTICIPANT_HEADER) === "host") return true;
+  if (isHostParticipant(getHeader(req, PARTICIPANT_HEADER))) return true;
   err(res, 403, "host-only action");
   return false;
 }
@@ -1808,7 +1856,12 @@ add("POST", "/shares/:id/revoke", (req, res, params) => {
 add("POST", "/shares/revoke-all", (_req, res) => {
   const { revoked } = revokeAllShares();
   for (const id of revoked) dropJoinsForShare(id);
-  json(res, 200, { ok: true, revoked: revoked.length });
+  // Enrolled host devices die with the tunnel too, and they matter MORE than the
+  // shares do: a dangling share is a stale guest grant, a dangling device is
+  // stale host authority. Same call site, no way to remember one and forget the
+  // other.
+  const { revoked: devicesRevoked } = revokeAllHostDevices();
+  json(res, 200, { ok: true, revoked: revoked.length, devicesRevoked: devicesRevoked.length });
 });
 
 add("GET", "/shares", (req, res) => {
@@ -1816,7 +1869,7 @@ add("GET", "/shares", (req, res) => {
   // they can manage/revoke co-guests). drive/spectate get nothing to act on.
   const all = listShares();
   const raw = getHeader(req, PARTICIPANT_HEADER);
-  if (raw === "host") return json(res, 200, { shares: all });
+  if (isHostParticipant(raw)) return json(res, 200, { shares: all });
   // Absent → 403, not "host". Listing every share (ids included) to a caller
   // that identified itself as nobody is the same default that made the
   // mutating routes forgeable; see checkParticipant.
@@ -1854,6 +1907,109 @@ add("GET", "/shares/:id", (_req, res, params, url) => {
     peerName: r.peerName,
     expiresAt: r.expiresAt,
   });
+});
+
+// ── Host devices (the host's own second screen) ───────────────────────────────
+// The mirror image of the peer flow. A peer arrives holding a link and waits to
+// be admitted; a device is enrolled BY the host, from the machine, and redeems a
+// single-use code that proves the host was standing there. So there is no admit
+// gate here — the code IS the admission — and what comes out the other side is
+// the host, not a guest with a nicer name.
+
+/** Mint a single-use enrollment code for the current tunnel host. Host-only.
+ *
+ * An already-enrolled device passes requireHost and can therefore enroll another
+ * one. That is deliberate, not an oversight: the chosen model is "full host,
+ * revocable per device", and a credential that can already run arbitrary code in
+ * the sandbox gains nothing from being unable to mint a second cookie. Revoking
+ * is the control, not enrollment. */
+add("POST", "/host-devices/enroll-code", async (req, res) => {
+  if (!requireHost(req, res)) return;
+  let body: { publicHost?: unknown; label?: unknown; ttlMs?: unknown };
+  try { body = await readJson(req, MAX_BYTES_DEFAULT); } catch (e: any) { return err(res, e.status ?? 400, e.message); }
+  const publicHost = boundedString(body.publicHost, 253);
+  if (!publicHost) return err(res, 400, "missing required field: publicHost");
+  const label = typeof body.label === "string" ? body.label : null;
+  const ttlMs = typeof body.ttlMs === "number" && Number.isFinite(body.ttlMs) ? body.ttlMs : null;
+  const { code, expiresAt, deviceTtlMs } = createEnrollCode({ publicHost, label, ttlMs });
+  // The code is a bearer credential for host authority. It goes in the response
+  // body (straight into the QR the host is looking at) and NOWHERE else — not
+  // the log line, not the event stream.
+  log.info("host-devices", "enrollment code minted", { publicHost, expiresAt });
+  json(res, 200, { code, expiresAt, deviceTtlMs });
+});
+
+/** Redeem a code into a device grant. Reachable WITHOUT host auth by
+ * construction: the phone doing the redeeming has no credential yet, which is
+ * the entire problem being solved. The code plus the host binding is the proof.
+ * The dashboard route in front of this one is the rate limiter. */
+add("POST", "/host-devices/redeem", async (req, res) => {
+  let body: { code?: unknown; publicHost?: unknown; label?: unknown };
+  try { body = await readJson(req, MAX_BYTES_DEFAULT); } catch (e: any) { return err(res, e.status ?? 400, e.message); }
+  if (typeof body.code !== "string") return err(res, 400, "missing required field: code");
+  const publicHost = boundedString(body.publicHost, 253);
+  if (!publicHost) return err(res, 400, "missing required field: publicHost");
+  const label = typeof body.label === "string" ? body.label : null;
+  const result = redeemEnrollCode(body.code, publicHost, label);
+  if (!result.ok) return err(res, 403, result.reason);
+  // Audit trail: enrolling a device is a grant of host authority, so it leaves a
+  // marker in the transcript stream the same way admitting a peer does. No
+  // session id — this is install-wide, not per-session.
+  try {
+    ingestEventLine(JSON.stringify({
+      ts: new Date().toISOString(),
+      hook: "HostDeviceEnrolled",
+      ctx: { device_id: result.device.deviceId, label: result.device.label, message: `Host device "${result.device.label}" was enrolled` },
+    }));
+  } catch { /* non-fatal */ }
+  json(res, 200, {
+    deviceId: result.device.deviceId,
+    label: result.device.label,
+    publicHost: result.device.publicHost,
+    expiresAt: result.device.expiresAt,
+  });
+});
+
+/** The host's device list, for the revoke UI. Host-only. */
+add("GET", "/host-devices", (req, res) => {
+  if (!requireHost(req, res)) return;
+  json(res, 200, { devices: listHostDevices() });
+});
+
+/** Liveness probe for one device: 200 while enrolled, 404 once revoked/expired.
+ *
+ * The exact counterpart of GET /shares/:id, and it exists for the same consumer:
+ * the dashboard's front process, which holds the live WebSocket feeds and has no
+ * participant identity of its own to present. It polls this so a revoked device's
+ * event stream is cut within seconds rather than surviving on a signed token that
+ * is still cryptographically valid.
+ *
+ * Returns metadata only, no secrets — there are none to return. */
+add("GET", "/host-devices/:id", (_req, res, params) => {
+  const d = getHostDevice(params.id);
+  if (!d) return err(res, 404, "unknown device");
+  json(res, 200, {
+    deviceId: d.deviceId,
+    label: d.label,
+    publicHost: d.publicHost,
+    expiresAt: d.expiresAt,
+  });
+});
+
+/** Revoke one device. Host-only, and instant: the next request that device makes
+ * fails isHostParticipant and it is a stranger again. */
+add("POST", "/host-devices/:id/revoke", (req, res, params) => {
+  if (!requireHost(req, res)) return;
+  const result = revokeHostDevice(params.id);
+  if (!result.ok) return err(res, 404, "unknown device");
+  try {
+    ingestEventLine(JSON.stringify({
+      ts: new Date().toISOString(),
+      hook: "HostDeviceRevoked",
+      ctx: { device_id: params.id, message: "A host device was revoked" },
+    }));
+  } catch { /* non-fatal */ }
+  json(res, 200, { ok: true });
 });
 
 // ── Host-admits-each-join gate ───────────────────────────────────────────────
@@ -2047,7 +2203,7 @@ add("GET", "/pending-joins", (req, res) => {
   const raw = getHeader(req, PARTICIPANT_HEADER);
   // Only an explicit host sees every pending join. There is no "internal,
   // header-less call" — see requireHost.
-  if (raw === "host") return json(res, 200, { joins: withCap });
+  if (isHostParticipant(raw)) return json(res, 200, { joins: withCap });
   if (!raw || !raw.startsWith("peer:")) return err(res, 403, "invalid participant");
   // A peer may see pending joins only for the session they're in, and only with
   // a "full" share (drive/spectate can't admit, so they get nothing to act on).
@@ -2075,14 +2231,22 @@ add("GET", "/pending-joins", (req, res) => {
  * so a peer can only ever subscribe to their own session.
  */
 type PushCaller =
-  | { ok: true; ownerKind: "host"; shareId: null; sessionId: null; displayName: string; capability: null }
-  | { ok: true; ownerKind: "peer"; shareId: string; sessionId: string; displayName: string | null; capability: ShareCapability }
+  | { ok: true; ownerKind: "host"; shareId: null; sessionId: null; displayName: string; capability: null; deviceId: string | null }
+  | { ok: true; ownerKind: "peer"; shareId: string; sessionId: string; displayName: string | null; capability: ShareCapability; deviceId: null }
   | { ok: false; status: number; reason: string };
 
 function pushCaller(req: IncomingMessage): PushCaller {
   const raw = getHeader(req, PARTICIPANT_HEADER);
-  if (raw === "host") {
-    return { ok: true, ownerKind: "host", shareId: null, sessionId: null, displayName: "host", capability: null };
+  // An enrolled device subscribes AS the host, not as a fifth kind of owner:
+  // ownerKey is "host", so a notification muted on the laptop is muted on the
+  // phone, and both get the same host-level delivery rules. That is the point of
+  // the whole feature — one identity, several screens.
+  if (isHostParticipant(raw)) {
+    // WHICH screen, though, is recorded on the subscription — so revoking a phone
+    // takes its notifications with it. It does not scope delivery; a device hears
+    // about everything the host does.
+    const deviceId = raw!.startsWith("host:") ? raw!.slice("host:".length) : null;
+    return { ok: true, ownerKind: "host", shareId: null, sessionId: null, displayName: "host", capability: null, deviceId };
   }
   if (!raw || !raw.startsWith("peer:")) return { ok: false, status: 403, reason: "invalid participant" };
   const shareId = raw.slice("peer:".length);
@@ -2099,6 +2263,7 @@ function pushCaller(req: IncomingMessage): PushCaller {
     sessionId: v.record.sessionId,
     displayName: v.record.peerName,
     capability: v.record.capability,
+    deviceId: null,
   };
 }
 
@@ -2128,6 +2293,7 @@ add("POST", "/push/subscribe", async (req, res) => {
       sessionId: who.sessionId,
       displayName: who.displayName,
       capability: who.capability,
+      deviceId: who.deviceId,
       endpoint,
       keys: { p256dh, auth },
     });
@@ -2151,10 +2317,17 @@ add("POST", "/push/subscribe", async (req, res) => {
 add("POST", "/push/presence", async (req, res) => {
   const who = pushCaller(req);
   if (!who.ok) return err(res, who.status, who.reason);
-  let body: { sessionId?: unknown; active?: unknown };
+  let body: { sessionId?: unknown; active?: unknown; viewerId?: unknown };
   try { body = await readJson(req, MAX_BYTES_DEFAULT); } catch (e: any) { return err(res, e.status ?? 400, e.message); }
   const sessionId = boundedString(body.sessionId, 200);
   if (!sessionId) return err(res, 400, "invalid sessionId");
+  // Which SCREEN this beat is about. One person now legitimately watches from
+  // several (the host's laptop and their enrolled phone both beat as "host"), and
+  // a single slot per person made the last beat the only truth — so pocketing the
+  // phone cancelled the laptop and the phone then buzzed about what was on the
+  // laptop's screen. Untrusted and harmless: the worst a lie does is cancel one of
+  // your OWN screens, which is a thing you may already do.
+  const viewerId = boundedString(body.viewerId, 64);
   // A peer can only be present on their own session; reject any other claim
   // rather than letting them suppress notifications for a session they can't see.
   if (who.ownerKind === "peer") {
@@ -2165,7 +2338,7 @@ add("POST", "/push/presence", async (req, res) => {
   // active === false (backgrounded tab) clears presence, so notifications
   // resume at once rather than waiting for the beat to age out.
   const active = body.active !== false;
-  json(res, 200, setParticipantActive(ownerKeyFor(who.ownerKind, who.shareId), active ? sessionId : null));
+  json(res, 200, setParticipantActive(ownerKeyFor(who.ownerKind, who.shareId), active ? sessionId : null, viewerId));
 });
 
 add("POST", "/push/unsubscribe", async (req, res) => {
@@ -2485,6 +2658,9 @@ async function main() {
       log.warn("sandbox", "burnRestoredSessions failed", { err: String(e) });
     });
   bootShares();
+  // Same per-run discard as shares, and for the same reason: a device grant is
+  // bound to the tunnel hostname, which is new on every start.
+  bootHostDevices();
   startSessionsWatcher();
   startSkillsWatcher();
   startIngestor();
@@ -2573,6 +2749,12 @@ async function main() {
       // links across a stop/start (the tunnel host they're bound to is gone).
       try { revokeAllShares(); } catch (e) {
         log.warn("sandbox", "revokeAllShares on shutdown failed", { err: String(e) });
+      }
+      // Same for enrolled host devices: `host-devices.json` must not carry host
+      // authority across a stop/start. bootHostDevices() discards the file
+      // anyway, so this is the belt to that braces.
+      try { revokeAllHostDevices(); } catch (e) {
+        log.warn("sandbox", "revokeAllHostDevices on shutdown failed", { err: String(e) });
       }
       try { await shutdownActiveSessions(); } catch (e) {
         log.warn("sandbox", "shutdownActiveSessions failed", { err: String(e) });

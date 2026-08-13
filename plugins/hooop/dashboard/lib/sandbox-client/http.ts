@@ -21,6 +21,7 @@ import type {
   FileTreeResponse,
   FilePreviewResponse,
   FileRawResponse,
+  HostDeviceRecord,
   PreviewLog,
   PreviewRecord,
   PreviewsResponse,
@@ -250,8 +251,10 @@ export interface SandboxClient {
   ): Promise<{ ok: boolean; id?: string }>;
   pushUnsubscribe(endpoint: string, participant?: string): Promise<{ ok: boolean }>;
   /** Relay a presence beat so the sender can skip notifying a participant about
-   * the session already on their screen. Fed from the presence heartbeat. */
-  pushPresence(sessionId: string, active: boolean, participant?: string): Promise<{ ok: boolean }>;
+   * the session already on their screen. Fed from the presence heartbeat.
+   * `viewerId` names the SCREEN, so one person watching from two devices doesn't
+   * have the quiet one cancel the one they're actually looking at. */
+  pushPresence(sessionId: string, active: boolean, participant?: string, viewerId?: string | null): Promise<{ ok: boolean }>;
   /** This viewer's mutes: a global flag plus the sessions they've silenced. */
   pushMutes(participant?: string): Promise<{ global: boolean; sessions: string[] }>;
   /** Mute/unmute one session, or everything when sessionId is null. */
@@ -278,6 +281,31 @@ export interface SandboxClient {
   /** Record that a peer left a session (emits a `PeerLeft` transcript divider).
    * `name` is a cosmetic label for the marker. */
   peerLeave(sessionId: string, name?: string | null, shareId?: string | null): Promise<{ ok: boolean }>;
+
+  // Host devices — the host's own second screen over the tunnel. Mirror image of
+  // the share flow: enrolled BY the host from the machine, so a single-use code
+  // replaces the admit gate, and what it yields is the host rather than a guest.
+  /** Mint a single-use enrollment code bound to the current tunnel host.
+   * Host-only (the sandbox re-checks). The code is a bearer secret: it goes
+   * straight into the QR the host is looking at and is never logged. */
+  createHostEnrollCode(
+    publicHost: string,
+    label?: string | null,
+    ttlMs?: number | null,
+    participant?: string,
+  ): Promise<{ code: string; expiresAt: number; deviceTtlMs: number }>;
+  /** Redeem a code into a device grant. Null when the code is unknown, expired,
+   * already used, or minted for a different host — the caller must not tell
+   * those apart out loud. */
+  redeemHostEnrollCode(
+    code: string,
+    publicHost: string,
+    label?: string | null,
+  ): Promise<{ deviceId: string; label: string; publicHost: string; expiresAt: number | null } | null>;
+  /** Enrolled devices, for the host's revoke list. Host-only. */
+  listHostDevices(participant?: string): Promise<{ devices: HostDeviceRecord[] }>;
+  /** Revoke one device. Takes effect on that device's very next request. */
+  revokeHostDevice(deviceId: string, participant?: string): Promise<{ ok: boolean }>;
 
   eventBus: EventEmitter;
   sessionsBus: EventEmitter;
@@ -669,8 +697,8 @@ export function createHttpClient(socketPath: string): SandboxClient {
       request("POST", "/push/subscribe", sub, participantOpts(participant)),
     pushUnsubscribe: (endpoint, participant) =>
       request("POST", "/push/unsubscribe", { endpoint }, participantOpts(participant)),
-    pushPresence: (sessionId, active, participant) =>
-      request("POST", "/push/presence", { sessionId, active }, participantOpts(participant)),
+    pushPresence: (sessionId, active, participant, viewerId) =>
+      request("POST", "/push/presence", { sessionId, active, viewerId: viewerId ?? null }, participantOpts(participant)),
     pushMutes: (participant) => request("GET", "/push/mute", undefined, participantOpts(participant)),
     setPushMute: (sessionId, muted, participant) =>
       request("POST", "/push/mute", { sessionId, muted }, participantOpts(participant)),
@@ -698,6 +726,29 @@ export function createHttpClient(socketPath: string): SandboxClient {
     },
     listPendingJoins: (participant) => request("GET", "/pending-joins", undefined, participantOpts(participant)),
     peerLeave: (sessionId, name, shareId) => request("POST", "/peer-leave", { sessionId, name: name ?? null, shareId: shareId ?? null }),
+
+    createHostEnrollCode: (publicHost, label, ttlMs, participant) =>
+      request(
+        "POST",
+        "/host-devices/enroll-code",
+        { publicHost, label: label ?? null, ttlMs: ttlMs ?? null },
+        participantOpts(participant),
+      ),
+    redeemHostEnrollCode: async (code, publicHost, label) => {
+      try {
+        return await request("POST", "/host-devices/redeem", { code, publicHost, label: label ?? null });
+      } catch (e: any) {
+        // 403 covers every "no" the sandbox gives here (bad code, expired,
+        // already used, wrong host, device cap reached). Collapsing them into
+        // null keeps the route above from accidentally growing a message that
+        // tells a guesser which of those it was.
+        if (e?.status === 403) return null;
+        throw e;
+      }
+    },
+    listHostDevices: (participant) => request("GET", "/host-devices", undefined, participantOpts(participant)),
+    revokeHostDevice: (deviceId, participant) =>
+      request("POST", `/host-devices/${encodeURIComponent(deviceId)}/revoke`, undefined, participantOpts(participant)),
 
     eventBus: localEventBus,
     sessionsBus: localSessionsBus,

@@ -21,6 +21,37 @@ import { useEffect, useState } from "react";
 const PEER_NAME_KEY = "hooop_peer_name";
 
 /**
+ * Id for THIS TAB, used to sub-divide presence.
+ *
+ * Identity answers "who are you" and is decided server-side. This answers "which
+ * screen", and the two are now genuinely different questions: the host beats as
+ * `host` from their laptop AND their enrolled phone, and a peer who reopened
+ * their link on a second device beats as the same share id from both. Presence
+ * keyed on identity alone had them share one slot and fight — the backgrounded
+ * phone dimmed the laptop, and each tab's `typing:false` cancelled the other's
+ * `typing:true`.
+ *
+ * Deliberately module-level and in-memory, not stored: the lifetime we want is
+ * exactly "this tab, this page load". sessionStorage would survive a reload and
+ * be shared by a duplicated tab; localStorage would make every tab in the browser
+ * claim to be the same screen, which is the bug.
+ */
+const VIEWER_ID = (() => {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    // No crypto (ancient browser, non-secure context): any distinct-enough string
+    // will do. This value is not a credential — it only groups presence rows.
+    return `v${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  }
+})();
+
+/** This tab's presence id. See {@link VIEWER_ID}. */
+export function viewerId(): string {
+  return VIEWER_ID;
+}
+
+/**
  * False on the server AND on the first client render, true afterwards. Gate any
  * render-time use of the browser-only readers here on it, so the first client
  * render matches the server and the real value lands on the next paint:

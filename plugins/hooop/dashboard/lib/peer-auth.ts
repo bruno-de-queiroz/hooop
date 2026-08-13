@@ -12,15 +12,36 @@ const PEER_CAP_HEADER = "x-hooop-peer-capability";
 export type ShareCapability = "full" | "drive" | "spectate";
 
 export type Participant =
-  | { kind: "host" }
+  /** The operator. `deviceId` is set when they arrived on one of their own
+   *  enrolled devices over the tunnel rather than on the machine itself — same
+   *  identity and same powers either way, so nothing downstream should branch on
+   *  it except a UI that wants to say "you're on your phone". */
+  | { kind: "host"; deviceId?: string }
   | { kind: "peer"; shareId: string }
   | { kind: "none" };
 
 export function participantOf(req: Request): Participant {
   const raw = req.headers.get(PARTICIPANT_HEADER) ?? "none";
   if (raw === "host") return { kind: "host" };
+  // `host:<deviceId>` — the host on an enrolled device. The proxy only emits
+  // this after verifying the device token's signature and host binding, and the
+  // sandbox re-validates the id against its device registry on every call, so
+  // treating it as the host here is not a shortcut: it is the same two-gate
+  // arrangement the peer path uses.
+  if (raw.startsWith("host:")) {
+    const deviceId = raw.slice("host:".length);
+    if (deviceId) return { kind: "host", deviceId };
+    return { kind: "none" };
+  }
   if (raw.startsWith("peer:")) return { kind: "peer", shareId: raw.slice("peer:".length) };
   return { kind: "none" };
+}
+
+/** The enrolled device this request came from, or null when the host is on the
+ *  machine (or the caller isn't the host). UI/telemetry only. */
+export function hostDeviceId(req: Request): string | null {
+  const p = participantOf(req);
+  return p.kind === "host" ? p.deviceId ?? null : null;
 }
 
 /** True only for the local operator (install-token auth). */

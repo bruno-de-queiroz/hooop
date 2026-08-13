@@ -5,6 +5,7 @@ import { QRCodeSVG } from "qrcode.react";
 import type { ShareRecord } from "@/lib/sandbox-types";
 import { IconButton } from "../ui";
 import { Modal } from "../ui/Overlay";
+import { HostDevicesSection } from "./HostDevicesSection";
 import { cn } from "../ui/cn";
 
 // Shell-native port of the legacy ShareDialog (per-session peer sharing).
@@ -421,6 +422,16 @@ export function ShellShareModal({
                 ))}
               </ul>
             </div>
+          )}
+
+          {/* Host only. A peer cannot enroll devices — that would hand out host
+             authority from a guest seat — and the routes refuse it regardless, so
+             showing the section to them would only be a dead end. Their own
+             "continue on another device" affordance lives in the shared-session
+             panel, where it belongs: it re-uses their existing share rather than
+             creating anything. */}
+          {!peerMode && (
+            <HostDevicesSection publicBaseUrl={publicBaseUrl} enabled={running} />
           )}
         </div>
       </div>

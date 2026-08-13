@@ -13,7 +13,12 @@ import { renderHook, act } from "@testing-library/react";
  */
 
 vi.mock("@/app/components/useSSE", () => ({ useSSE: () => {} }));
-vi.mock("@/app/components/lib/participant", () => ({ myDisplayName: () => "Bruno" }));
+vi.mock("@/app/components/lib/participant", () => ({
+  myDisplayName: () => "Bruno",
+  // Fixed rather than random: the beat carries it verbatim, so a stable value
+  // keeps the body assertions below readable.
+  viewerId: () => "tab-a",
+}));
 
 import { usePresence } from "./usePresence";
 

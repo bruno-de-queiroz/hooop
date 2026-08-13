@@ -52,6 +52,10 @@ const DASHBOARD_TOKEN = process.env.HOOOP_DASHBOARD_TOKEN ?? "";
 const PEER_SECRET = process.env.HOOOP_PEER_SIGNING_SECRET ?? "";
 const PEER_COOKIE = "hooop_peer";
 const INSTALL_COOKIE = "hooop_token";
+// The host's own enrolled device, arriving over the tunnel. Its install cookie is
+// scoped to the dashboard origin and never reaches *.trycloudflare.com, so this
+// signed token is the only evidence the operator is the operator out there.
+const HOST_DEVICE_COOKIE = "hooop_host_device";
 
 // Sandbox UDS — used to check share revocation for the live (WS) channel, so a
 // revoked peer's feed is cut, not just their writes.
@@ -81,6 +85,26 @@ function shareLive(shareId) {
     if (!token || !shareId) return resolve(true); // can't check → don't over-drop
     const r = udsRequest(
       { socketPath: SANDBOX_SOCKET, method: "GET", path: `/shares/${encodeURIComponent(shareId)}`,
+        headers: { [SANDBOX_TOKEN_HEADER]: token }, timeout: 3000 },
+      (res) => { res.resume(); resolve(res.statusCode !== 404); },
+    );
+    r.on("error", () => resolve(true));
+    r.on("timeout", () => { r.destroy(); resolve(true); });
+    r.end();
+  });
+}
+
+// Is an enrolled host device still live? Exact counterpart of shareLive, same
+// fail-open reasoning: only an explicit 404 means revoked, because dropping the
+// operator's phone off the live feed on a local socket blip would be a worse bug
+// than a few extra seconds of a grant we are about to re-check anyway.
+function deviceLive(deviceId) {
+  return new Promise((resolve) => {
+    let token = "";
+    try { token = readFileSync(SANDBOX_TOKEN_FILE, "utf-8").trim(); } catch { /* ignore */ }
+    if (!token || !deviceId) return resolve(true); // can't check → don't over-drop
+    const r = udsRequest(
+      { socketPath: SANDBOX_SOCKET, method: "GET", path: `/host-devices/${encodeURIComponent(deviceId)}`,
         headers: { [SANDBOX_TOKEN_HEADER]: token }, timeout: 3000 },
       (res) => { res.resume(); resolve(res.statusCode !== 404); },
     );
@@ -185,10 +209,27 @@ function authUpgrade(req) {
   if (DASHBOARD_TOKEN && ctEq(cookies[INSTALL_COOKIE] ?? "", DASHBOARD_TOKEN)) {
     return { kind: "host" };
   }
+  // The host on one of their own enrolled devices. Checked BEFORE the peer cookie
+  // for the same reason the middleware does it: a browser can hold both (you
+  // paired yourself into a session, then enrolled the same phone), and the device
+  // is the stronger claim — a feed scoped to one session is not what the operator
+  // asked for. `kind === "host"` is required, so a peer token dropped into this
+  // cookie resolves to nothing; without that check the two credentials would be
+  // interchangeable, since they share a signing secret.
+  const deviceTok = cookies[HOST_DEVICE_COOKIE];
+  if (deviceTok) {
+    const d = verifyPeerToken(deviceTok);
+    if (d && d.kind === "host" && d.host === host && d.did) {
+      return { kind: "host", did: d.did };
+    }
+  }
   const peerTok = cookies[PEER_COOKIE];
   if (peerTok) {
     const p = verifyPeerToken(peerTok);
-    if (p && p.host === host && p.ses) {
+    // A host device token must never satisfy the peer path either: it carries no
+    // session, so `p.ses` already rejects it, but say so explicitly rather than
+    // relying on a field being absent to keep the two apart.
+    if (p && p.kind !== "host" && p.host === host && p.ses) {
       return { kind: "peer", ses: p.ses, sid: p.sid, allowed: new Set([p.ses]) };
     }
   }
@@ -475,14 +516,33 @@ process.on("SIGINT", () => { stopTunnel(); stopAllPreviewTunnels(); });
 // Host-only gate for the front process's own /api/tunnel endpoints. Peers never
 // hold the install cookie; same-origin blocks cross-site CSRF (the cookie is
 // SameSite=Strict, but we check Origin explicitly for mutations too).
-function isHostRequest(req) {
+//
+// Async because the operator may also be on one of their OWN enrolled devices,
+// out on the tunnel where the install cookie cannot reach — and that credential is
+// revocable, so answering "is this the host?" means asking the sandbox whether the
+// device is still enrolled. The install-cookie path stays synchronous in effect
+// (it short-circuits before any I/O) and unchanged in behaviour.
+//
+// The device gets the FULL set of these controls, stopping the tunnel included.
+// That is the chosen model — one identity, several screens — and it is also the
+// most useful thing a phone can do here: killing the pairing from wherever you
+// happen to be standing is exactly when you most want to.
+async function isHostRequest(req) {
   const host = normHost(req.headers.host);
   const origin = req.headers.origin;
   if (origin) {
     try { if (normHost(new URL(origin).host) !== host) return false; } catch { return false; }
   }
   const cookies = parseCookies(req.headers.cookie);
-  return !!DASHBOARD_TOKEN && ctEq(cookies[INSTALL_COOKIE] ?? "", DASHBOARD_TOKEN);
+  if (!!DASHBOARD_TOKEN && ctEq(cookies[INSTALL_COOKIE] ?? "", DASHBOARD_TOKEN)) return true;
+  const deviceTok = cookies[HOST_DEVICE_COOKIE];
+  if (!deviceTok) return false;
+  const d = verifyPeerToken(deviceTok);
+  // `kind === "host"` is required so a peer token in this cookie proves nothing;
+  // the host binding stops a grant minted for a dead tunnel being replayed on a
+  // new one. Revocation is the sandbox's answer, not ours.
+  if (!d || d.kind !== "host" || d.host !== host || !d.did) return false;
+  return deviceLive(d.did);
 }
 function sendJson(res, status, body) {
   const buf = Buffer.from(JSON.stringify(body));
@@ -493,7 +553,7 @@ function sendJson(res, status, body) {
 // in Next). Returns true if the request was handled.
 async function handleTunnel(req, res) {
   if ((req.url || "").split("?")[0] !== "/api/tunnel") return false;
-  if (!isHostRequest(req)) { sendJson(res, 403, { error: "host only" }); return true; }
+  if (!(await isHostRequest(req))) { sendJson(res, 403, { error: "host only" }); return true; }
   if (req.method === "GET") { sendJson(res, 200, tunnelStatus()); return true; }
   if (req.method === "POST") {
     const s = await startTunnel();
@@ -700,6 +760,17 @@ async function shareLiveCached(shareId) {
   return live;
 }
 
+// Same cache, same window, for enrolled devices: a preview iframe makes a request
+// per asset, and none of them should each cost a round trip to the sandbox.
+const deviceLiveCache = new Map();
+async function deviceLiveCached(deviceId) {
+  const hit = deviceLiveCache.get(deviceId);
+  if (hit && Date.now() - hit.at < SHARE_LIVE_CACHE_MS) return hit.live;
+  const live = await deviceLive(deviceId);
+  deviceLiveCache.set(deviceId, { at: Date.now(), live });
+  return live;
+}
+
 /** Node-side mirror of lib/preview-token.ts (same construction, same secret). */
 function verifyPreviewToken(token) {
   if (!token || !PEER_SECRET) return null;
@@ -751,6 +822,15 @@ async function authorizePreview(req, preview) {
   // shareLiveCached call below, which would otherwise look up a share named
   // "host", find none, and read that as revoked.
   if (payload.sid === "host") return { ok: true };
+  // The host on one of their own ENROLLED DEVICES. Unlike the bare "host" above,
+  // this one IS revocable, so it gets re-checked like a share does: revoking the
+  // phone stops the preview on the phone within seconds, rather than leaving it
+  // watching until the grant expires.
+  if (payload.sid.startsWith("host:")) {
+    const did = payload.sid.slice("host:".length);
+    if (!(await deviceLiveCached(did))) return { ok: false, status: 403, reason: "revoked" };
+    return { ok: true };
+  }
   if (!(await shareLiveCached(payload.sid))) return { ok: false, status: 403, reason: "revoked" };
   return { ok: true };
 }
@@ -1093,7 +1173,7 @@ async function runDriveAction(action) {
  */
 async function handlePreviewDrive(req, res) {
   if ((req.url || "").split("?")[0] !== "/api/preview-drive") return false;
-  if (!isHostRequest(req)) { sendJson(res, 403, { error: "host only" }); return true; }
+  if (!(await isHostRequest(req))) { sendJson(res, 403, { error: "host only" }); return true; }
   // GET reports the census, so "who is following?" is answerable from a terminal
   // instead of by opening every peer's console.
   if (req.method === "GET") {
@@ -1326,7 +1406,7 @@ function stopAllPreviewTunnels() {
  */
 async function handlePreviewTunnel(req, res) {
   if ((req.url || "").split("?")[0] !== "/api/preview-tunnel") return false;
-  if (!isHostRequest(req)) { sendJson(res, 403, { error: "host only" }); return true; }
+  if (!(await isHostRequest(req))) { sendJson(res, 403, { error: "host only" }); return true; }
 
   const slot = parseInt(new URL(req.url, "http://x").searchParams.get("slot") ?? "", 10);
   if (!Number.isFinite(slot) || slot < 1 || slot > PREVIEW_SLOTS) {
@@ -1533,9 +1613,15 @@ server.on("upgrade", (req, socket, head) => {
     socket.destroy();
     return;
   }
-  // A peer's share must still be live to open the feed — a revoked link can't
-  // reconnect to keep watching.
-  const gate = scope.kind === "peer" ? shareLive(scope.sid) : Promise.resolve(true);
+  // A peer's share — or an enrolled device's grant — must still be live to open
+  // the feed. A revoked credential can't reconnect to keep watching, whichever
+  // kind it is. The host at the machine has nothing to re-check: their authority
+  // is the install cookie, not a revocable grant.
+  const gate = scope.kind === "peer"
+    ? shareLive(scope.sid)
+    : scope.did
+      ? deviceLive(scope.did)
+      : Promise.resolve(true);
   gate.then((live) => {
     if (!live) {
       try { socket.write("HTTP/1.1 403 Forbidden\r\n\r\n"); socket.destroy(); } catch {}
@@ -1552,23 +1638,35 @@ server.on("upgrade", (req, socket, head) => {
   });
 });
 
-// Drop live peer feeds whose share got revoked mid-session. Poll every 5s and
-// close any peer socket whose share the sandbox no longer holds (deduped by
-// shareId so N peers on one share cost one check).
+// Drop live feeds whose grant got revoked mid-session. Poll every 5s and close
+// any socket whose share — or enrolled device — the sandbox no longer holds
+// (deduped by id, so N viewers on one grant cost one check).
+//
+// Devices are swept alongside shares rather than in a second timer because they
+// need it MORE, not less: revoking a phone that is still streaming the transcript
+// has to actually stop the transcript, and a signed token stays valid until it
+// expires, so the sandbox's registry is the only thing that can say "no".
 setInterval(async () => {
   const sids = new Set();
+  const dids = new Set();
   for (const c of clients) {
     if (c.scope.kind === "peer" && c.scope.sid) sids.add(c.scope.sid);
+    else if (c.scope.kind === "host" && c.scope.did) dids.add(c.scope.did);
   }
-  if (sids.size === 0) return;
-  const dead = new Set();
-  await Promise.all([...sids].map(async (sid) => {
-    if (!(await shareLive(sid))) dead.add(sid);
-  }));
-  if (dead.size === 0) return;
+  if (sids.size === 0 && dids.size === 0) return;
+  const deadShares = new Set();
+  const deadDevices = new Set();
+  await Promise.all([
+    ...[...sids].map(async (sid) => { if (!(await shareLive(sid))) deadShares.add(sid); }),
+    ...[...dids].map(async (did) => { if (!(await deviceLive(did))) deadDevices.add(did); }),
+  ]);
+  if (deadShares.size === 0 && deadDevices.size === 0) return;
   for (const c of clients) {
-    if (c.scope.kind === "peer" && dead.has(c.scope.sid)) {
-      try { c.ws.close(4403, "share revoked"); } catch {}
+    const dead =
+      (c.scope.kind === "peer" && deadShares.has(c.scope.sid)) ||
+      (c.scope.kind === "host" && c.scope.did && deadDevices.has(c.scope.did));
+    if (dead) {
+      try { c.ws.close(4403, c.scope.kind === "peer" ? "share revoked" : "device revoked"); } catch {}
       clients.delete(c);
     }
   }

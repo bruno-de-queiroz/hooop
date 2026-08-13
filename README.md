@@ -227,6 +227,21 @@ Burn rows carry a **flame avatar** in the sessions rail so a self-deleting sessi
 
 Peers get one of three capability levels when admitted: **full** (can act like the host, including admitting other peers), **drive** (can act, but not admit anyone), or **spectate** (read-only). A pending join shows up as an admit/deny toast for the host or any full-capability peer.
 
+### Your own second screen
+
+A share link invites **somebody else** in as a guest. To get hooop on **your own** phone, use **Your devices** in the share dialog instead: it shows a QR that is good for two minutes and can be scanned once. The device that scans it acts as **you** — same sessions, your name on your messages, no admit prompt, nothing marked as a guest joining.
+
+That is host authority on a public URL, so it is fenced in:
+
+- the code can only be minted by the host, expires in **2 minutes**, and works **once**;
+- the device gets its **own** revocable credential, never a copy of the install token, which does not leave the machine;
+- every device is bound to the current tunnel hostname, so all of them drop when the tunnel stops (a new tunnel means a new QR);
+- **Revoke** cuts a device instantly, including its live transcript feed and any preview it has open. Revoking the device you are holding signs it out.
+
+Peers can move devices too, without a new link. **Continue on another device** in the shared-session panel re-shows their existing link as a QR, so the second screen is the same guest with the same name, handle and access level. The host is still asked to admit them, as always.
+
+Either way there is still **one row per person** in the roster. Two screens make you `typing` if you are typing on either, `away` only once both are idle, and never a second participant.
+
 Run a turn with `/plan <task>` and the sandbox forces the agent **read-only**: it investigates, then submits a plan that opens in a **review panel**. The host and any full-capability peer can drop **inline comments** anchored to the exact passage, synced live for everyone, then **Approve** or **Request changes**. A rejection feeds the comments back and the agent revises the plan.
 
 ## Live previews
@@ -288,13 +303,14 @@ This is the "sandboxed agent" model: the OS-process boundary is the security bou
                               OPENAI_API_KEY / EMBEDDING_BASE_URL / EMBEDDING_MODEL /
                               EMBED_DIM / telemetry switches
   host-gateway.cache          cached host.docker.internal address
-  shares.json                 active pairing share links
   sandbox/profile/            the sandbox's Claude HOME (bind-mounted to /home/agent)
     .claude/
       .credentials.json       the sandbox's OWN Claude OAuth token (never the host's)
       hooop/
         events.db             SQLite (FTS5 + sqlite-vec); the dashboard reads it over the socket
         events.jsonl          append-only event audit log + replay buffer if the dashboard is down
+        shares.json           active pairing share links (cleared on every start)
+        host-devices.json     your own enrolled devices (cleared on every start)
         install-log.md        audit trail of every `hooop setup` run
         profile.md            identity + installed-stack summary written by the wizard
 ~/.local/share/hooop/          per-install secrets: dashboard.token, peer-signing.secret (0600)

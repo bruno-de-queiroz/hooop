@@ -127,4 +127,90 @@ describe("presence registry", () => {
       expect(lefts).toHaveLength(0);
     });
   });
+
+  describe("one identity, several screens", () => {
+    // The point of the whole viewerId mechanism: a person is one row in the
+    // roster whether they are watching from one device or three. Only liveness is
+    // counted per screen.
+    it("collapses a participant's screens into ONE roster row", () => {
+      mod.heartbeat({ sessionId: "s1", participantId: "host", viewerId: "laptop", name: "Bruno", kind: "host" });
+      mod.heartbeat({ sessionId: "s1", participantId: "host", viewerId: "phone", name: "Bruno", kind: "host" });
+      const list = mod.listPresence("s1");
+      expect(list).toHaveLength(1);
+      expect(list[0].participantId).toBe("host");
+      expect(list[0].viewers).toBe(2);
+    });
+
+    it("gives a peer on two devices one row and one handle", () => {
+      // Re-opening the same share link on a second device is the SAME guest: same
+      // share id, so same identity, so a single @handle rather than "bob" and
+      // "bob-2" competing for a mention.
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "v1", name: "Bob", kind: "peer" });
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "v2", name: "Bob", kind: "peer" });
+      const list = mod.listPresence("s1");
+      expect(list).toHaveLength(1);
+      expect(list[0].handle).toBe("bob");
+    });
+
+    it("is typing if ANY screen is typing", () => {
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "v1", name: "Bob", kind: "peer", typing: true });
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "v2", name: "Bob", kind: "peer", typing: false });
+      expect(mod.listPresence("s1")[0].typing).toBe(true);
+    });
+
+    it("a backgrounded second screen does not dim the one being used", () => {
+      // The bug this fixes: the phone in your pocket reported active:false and
+      // greyed out the laptop you were typing on.
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "laptop", name: "Bob", kind: "peer", active: true });
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "phone", name: "Bob", kind: "peer", active: false });
+      expect(mod.listPresence("s1")[0].away).toBe(false);
+    });
+
+    it("is away once EVERY screen is backgrounded", () => {
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "laptop", name: "Bob", kind: "peer", active: false });
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "phone", name: "Bob", kind: "peer", active: false });
+      expect(mod.listPresence("s1")[0].away).toBe(true);
+    });
+
+    it("takes the display name from the freshest screen", () => {
+      vi.useFakeTimers();
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "old", name: "Bobby", kind: "peer" });
+      vi.advanceTimersByTime(1000);
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "new", name: "Bob", kind: "peer" });
+      expect(mod.listPresence("s1")[0].name).toBe("Bob");
+    });
+
+    it("leave() from one screen keeps the person present, and says so", () => {
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "laptop", name: "Bob", kind: "peer" });
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "phone", name: "Bob", kind: "peer" });
+
+      // `gone: false` is what stops the leave route emitting a "Bob left" marker
+      // while Bob is still sitting there on his laptop.
+      expect(mod.leave("s1", "peer:abc", "phone")).toEqual({ gone: false });
+      const list = mod.listPresence("s1");
+      expect(list).toHaveLength(1);
+      expect(list[0].viewers).toBe(1);
+
+      expect(mod.leave("s1", "peer:abc", "laptop")).toEqual({ gone: true });
+      expect(mod.listPresence("s1")).toHaveLength(0);
+    });
+
+    it("leave() with no viewerId drops every screen (acting on the identity)", () => {
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "v1", name: "Bob", kind: "peer" });
+      mod.heartbeat({ sessionId: "s1", participantId: "peer:abc", viewerId: "v2", name: "Bob", kind: "peer" });
+      expect(mod.leave("s1", "peer:abc")).toEqual({ gone: true });
+      expect(mod.listPresence("s1")).toHaveLength(0);
+    });
+
+    it("a client that reports no viewerId behaves exactly as before", () => {
+      // Back-compat: an older tab shares the single default slot, so repeated
+      // beats refresh one entry instead of piling up phantom screens.
+      mod.heartbeat({ sessionId: "s1", participantId: "host", name: "Host", kind: "host" });
+      mod.heartbeat({ sessionId: "s1", participantId: "host", name: "Host", kind: "host" });
+      const list = mod.listPresence("s1");
+      expect(list).toHaveLength(1);
+      expect(list[0].viewers).toBe(1);
+    });
+  });
+
 });

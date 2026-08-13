@@ -12,6 +12,15 @@ interface Body {
   name?: string;
   typing?: boolean;
   leaving?: boolean;
+  /**
+   * Which SCREEN is beating — one browser tab, not one person.
+   *
+   * Client-supplied and NOT trusted for identity (that comes from the middleware
+   * header, as ever); this only sub-divides the caller's own presence row. The
+   * worst a forged value does is affect another of your own tabs, and lying that
+   * you are two tabs when you are one buys nothing: presence grants no access.
+   */
+  viewerId?: string;
   /** Whether the viewer's tab is in the foreground (document.visibilityState).
    * Absent → treated as active. Drives the `away` (dimmed) presence state. */
   active?: boolean;
@@ -63,10 +72,11 @@ export async function POST(req: NextRequest) {
   const name = (boundedString(body.name, 80) ?? defaultName).slice(0, 80);
 
   const active = body.active !== false;
+  const viewerId = boundedString(body.viewerId, 64) ?? undefined;
   if (body.leaving) {
-    leave(sessionId, participantId);
+    leave(sessionId, participantId, viewerId);
   } else {
-    heartbeat({ sessionId, participantId, name, kind, typing: !!body.typing, active });
+    heartbeat({ sessionId, participantId, viewerId, name, kind, typing: !!body.typing, active });
   }
 
   // Relay to the sandbox, which can't see this registry (presence is
@@ -77,7 +87,7 @@ export async function POST(req: NextRequest) {
   // Best-effort and deliberately not awaited into the response: presence is UI
   // awareness, and a sandbox blip must not make the roster stop updating.
   void client
-    .pushPresence(sessionId, active && !body.leaving, forwardedParticipant(req))
+    .pushPresence(sessionId, active && !body.leaving, forwardedParticipant(req), viewerId)
     .catch(() => { /* non-fatal: the beat just ages out and we notify */ });
 
   // `me` so the viewer can find itself in the roster by id rather than by

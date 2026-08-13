@@ -17,7 +17,7 @@ import { ShellAskQuestion } from "./ShellAskQuestion";
 import { ShellFilesReviewPill } from "./files/ShellFilesReviewPill";
 import { ShellShareModal } from "./ShellShareModal";
 import { ShellNewSession } from "./ShellNewSession";
-import { myDisplayName, isPeerClient, useMounted } from "../lib/participant";
+import { myDisplayName, isPeerClient, useMounted, viewerId } from "../lib/participant";
 
 // Center pane (Phase 3): the active session rendered as a chat thread + composer
 // (mockup's center). Reads everything from the providers — header, stats,
@@ -90,7 +90,9 @@ export function ShellCenterPane() {
       await fetch("/api/share/leave", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: myDisplayName() }),
+        // viewerId scopes the leave to THIS tab: the marker only fires once
+        // the person's last screen is gone.
+        body: JSON.stringify({ name: myDisplayName(), viewerId: viewerId() }),
       });
     } catch { /* leave anyway — the cookie clear is best-effort UX */ }
     window.location.replace("/left");

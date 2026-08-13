@@ -39,28 +39,33 @@ describe("presence heartbeat → notification suppression relay", () => {
   it("relays an active beat so the sender can skip a watching participant", async () => {
     const res = await mod.POST(post({ sessionId: "s1", name: "Bruno", active: true }) as never);
     expect(res.status).toBe(200);
-    expect(pushPresence).toHaveBeenCalledWith("s1", true, "host");
+    expect(pushPresence).toHaveBeenCalledWith("s1", true, "host", undefined);
   });
 
   it("relays a backgrounded tab as inactive, so notifications resume at once", async () => {
     await mod.POST(post({ sessionId: "s1", active: false }) as never);
-    expect(pushPresence).toHaveBeenCalledWith("s1", false, "host");
+    expect(pushPresence).toHaveBeenCalledWith("s1", false, "host", undefined);
   });
 
   it("treats an absent active flag as present", async () => {
     await mod.POST(post({ sessionId: "s1" }) as never);
-    expect(pushPresence).toHaveBeenCalledWith("s1", true, "host");
+    expect(pushPresence).toHaveBeenCalledWith("s1", true, "host", undefined);
   });
 
   it("relays a departure as inactive rather than leaving them marked present", async () => {
     await mod.POST(post({ sessionId: "s1", leaving: true }) as never);
-    expect(pushPresence).toHaveBeenCalledWith("s1", false, "host");
+    expect(pushPresence).toHaveBeenCalledWith("s1", false, "host", undefined);
+  });
+
+  it("forwards the viewer id so one person's two screens stay distinct", async () => {
+    await mod.POST(post({ sessionId: "s1", active: true, viewerId: "tab-a" }) as never);
+    expect(pushPresence).toHaveBeenCalledWith("s1", true, "host", "tab-a");
   });
 
   it("forwards a peer under their own share identity", async () => {
     participant = { kind: "peer", shareId: "share-1" };
     await mod.POST(post({ sessionId: "s1", active: true }) as never);
-    expect(pushPresence).toHaveBeenCalledWith("s1", true, "peer:share-1");
+    expect(pushPresence).toHaveBeenCalledWith("s1", true, "peer:share-1", undefined);
   });
 
   it("still answers with the roster when the sandbox relay fails", async () => {

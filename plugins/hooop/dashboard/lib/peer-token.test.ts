@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { signPeerToken, verifyPeerToken, type PeerTokenPayload } from "./peer-token";
+import {
+  signPeerToken,
+  verifyPeerToken,
+  signHostDeviceToken,
+  verifyHostDeviceToken,
+  type PeerTokenPayload,
+} from "./peer-token";
 
 const SECRET = "s".repeat(48);
 const base: PeerTokenPayload = {
@@ -58,5 +64,49 @@ describe("peer-token sign/verify", () => {
     expect(await verifyPeerToken(".onlysig", SECRET)).toBeNull();
     expect(await verifyPeerToken("payload.", SECRET)).toBeNull();
     expect(await verifyPeerToken("a.b.c", SECRET)).toBeNull();
+  });
+});
+
+describe("host device tokens", () => {
+  // Both kinds are signed with the SAME secret, so a valid signature answers
+  // "did we issue this?" and nothing else. The `kind` claim is what keeps "a
+  // guest of one session" and "the operator of this machine" apart, and it has to
+  // hold in both directions.
+  it("round-trips a device token", async () => {
+    const t = await signHostDeviceToken({ did: "device-1", host: "abc.trycloudflare.com" }, SECRET);
+    const p = await verifyHostDeviceToken(t, SECRET);
+    expect(p).toMatchObject({ kind: "host", did: "device-1", host: "abc.trycloudflare.com" });
+  });
+
+  it("a PEER token is not a device token", async () => {
+    const t = await signPeerToken(base, SECRET);
+    expect(await verifyHostDeviceToken(t, SECRET)).toBeNull();
+  });
+
+  it("a DEVICE token is not a peer token", async () => {
+    const t = await signHostDeviceToken({ did: "device-1", host: base.host }, SECRET);
+    expect(await verifyPeerToken(t, SECRET)).toBeNull();
+  });
+
+  it("rejects a device token signed with another secret", async () => {
+    const t = await signHostDeviceToken({ did: "device-1", host: base.host }, SECRET);
+    expect(await verifyHostDeviceToken(t, "x".repeat(48))).toBeNull();
+  });
+
+  it("rejects an expired device token", async () => {
+    const t = await signHostDeviceToken({ did: "device-1", host: base.host, exp: Date.now() - 1000 }, SECRET);
+    expect(await verifyHostDeviceToken(t, SECRET)).toBeNull();
+  });
+
+  it("rejects a device token with no device id", async () => {
+    // Would otherwise resolve to the participant string `host:`, which is neither
+    // the local host nor a device the sandbox can look up.
+    const t = await signHostDeviceToken({ did: "", host: base.host }, SECRET);
+    expect(await verifyHostDeviceToken(t, SECRET)).toBeNull();
+  });
+
+  it("rejects a peer token that lost its share id", async () => {
+    const t = await signPeerToken({ ...base, sid: undefined as unknown as string }, SECRET);
+    expect(await verifyPeerToken(t, SECRET)).toBeNull();
   });
 });

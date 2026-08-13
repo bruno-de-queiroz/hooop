@@ -3,7 +3,7 @@ import { Archivo, JetBrains_Mono } from "next/font/google";
 import { headers, cookies } from "next/headers";
 import "./globals.css";
 import AuthBootstrap from "./components/AuthBootstrap";
-import { PEER_COOKIE } from "@/lib/peer-token";
+import { PEER_COOKIE, HOST_DEVICE_COOKIE } from "@/lib/peer-token";
 
 // Desktop-app type tiers (DESIGN.md): Archivo for UI/display, JetBrains Mono for
 // figures/code. next/font self-hosts them and exposes CSS vars consumed by
@@ -53,6 +53,12 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   // CRITICAL: the install token must NEVER reach a peer. Middleware injects a
   // trusted `x-hooop-participant` header (it strips any client-supplied one):
   //   - "host"      → emit the install token (localhost operator).
+  //   - "host:<id>" → the SAME operator on an enrolled device, reached over the
+  //                   tunnel. Emit that device's OWN signed token (its cookie
+  //                   value), NEVER the install token: the install token is the
+  //                   one secret that must not leave the machine, which is the
+  //                   whole reason a device gets a revocable credential instead
+  //                   of a copy of it.
   //   - "peer:<id>" → emit the peer's OWN signed token (their cookie value),
   //                   never the install token.
   //   - anything else → emit nothing.
@@ -61,12 +67,19 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   let token = "";
   if (participant === "host") {
     token = process.env.HOOOP_DASHBOARD_TOKEN ?? "";
+  } else if (participant.startsWith("host:")) {
+    token = (await cookies()).get(HOST_DEVICE_COOKIE)?.value ?? "";
   } else if (participant.startsWith("peer:")) {
     token = (await cookies()).get(PEER_COOKIE)?.value ?? "";
   }
   // Non-secret: lets the client tailor UI (host sees Share; peer shows as a
-  // guest in presence). "host" | "peer" | "none".
-  const participantKind = participant.startsWith("peer:") ? "peer" : participant;
+  // guest in presence). "host" | "peer" | "none" — an enrolled device collapses
+  // to plain "host", because it IS the host and every host affordance applies.
+  const participantKind = participant.startsWith("peer:")
+    ? "peer"
+    : participant.startsWith("host:")
+      ? "host"
+      : participant;
   // For a peer, the session they're locked to — lets the client pin selection
   // and hide session-switching. Trusted (injected by middleware).
   const peerSession = participantKind === "peer" ? hdrs.get("x-hooop-peer-session") ?? "" : "";
