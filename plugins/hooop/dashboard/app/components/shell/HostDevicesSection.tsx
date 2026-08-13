@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, Loader2, Smartphone, Trash2 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import type { HostDeviceRecord } from "@/lib/sandbox-types";
@@ -59,36 +59,71 @@ export function HostDevicesSection({
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  /** Label of a device that just finished enrolling, for a one-line confirmation.
+   *  Cleared when another code is minted. */
+  const [justAdded, setJustAdded] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  /** How many devices existed when the current code was minted, so a new arrival
+   *  is recognisable without the server telling us which one it was. */
+  const baselineRef = useRef(0);
+
+  const fetchDevices = useCallback(async () => {
     try {
       const r = await fetch("/api/host-device");
-      if (r.ok) {
-        const d = (await r.json()) as { devices: HostDeviceRecord[]; thisDevice: string | null };
-        setDevices(d.devices);
-        setThisDevice(d.thisDevice);
-      }
-    } catch { /* non-fatal */ }
+      if (!r.ok) return null;
+      return (await r.json()) as { devices: HostDeviceRecord[]; thisDevice: string | null };
+    } catch {
+      return null; /* non-fatal */
+    }
   }, []);
+
+  const refresh = useCallback(async () => {
+    const d = await fetchDevices();
+    if (!d) return;
+    setDevices(d.devices);
+    setThisDevice(d.thisDevice);
+  }, [fetchDevices]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  // Tick only while a code is live — the label counts down, and a permanent timer
-  // would re-render this panel forever for no reason. On the tick that crosses the
-  // deadline we also re-list, because the most likely reason a code stopped being
-  // useful is that it was USED and the new device is now in the list.
+  // While a code is live: count down, and WATCH for the device arriving.
+  //
+  // Without the watching part, the primary flow ended in silence. You scan the
+  // QR, the phone lands in the session, and the laptop keeps showing a QR that
+  // has already been used — for up to the full two minutes, with nothing to say
+  // it worked. The code is single-use, so that dead QR is also actively
+  // misleading to anyone else looking at the screen.
+  //
+  // Polling rather than the event stream because it is scoped to this dialog
+  // being open and needs no wiring; a scan-to-confirmation gap of a few seconds
+  // is well inside "felt instant".
   useEffect(() => {
     if (!enrollment) return;
+    let ticks = 0;
     const iv = setInterval(() => {
       const t = Date.now();
       setNow(t);
       if (t >= enrollment.expiresAt) {
         clearInterval(iv);
         void refresh();
+        return;
       }
+      ticks += 1;
+      if (ticks % 3 !== 0) return;
+      void fetchDevices().then((d) => {
+        if (!d) return;
+        setDevices(d.devices);
+        setThisDevice(d.thisDevice);
+        if (d.devices.length > baselineRef.current) {
+          // It landed. Drop the QR rather than leaving a used one on screen.
+          clearInterval(iv);
+          setEnrollment(null);
+          setJustAdded(d.devices[d.devices.length - 1]?.label ?? null);
+        }
+      });
     }, 1000);
     return () => clearInterval(iv);
-  }, [enrollment, refresh]);
+  }, [enrollment, refresh, fetchDevices]);
 
   // Derived, not mirrored into state: an expired code is a fact about the clock,
   // and keeping a second copy of it only creates a moment where the two disagree
@@ -102,6 +137,7 @@ export function HostDevicesSection({
     }
     setMinting(true);
     setError(null);
+    setJustAdded(null);
     try {
       const res = await fetch("/api/host-device/code", {
         method: "POST",
@@ -113,6 +149,15 @@ export function HostDevicesSection({
         setError(data?.error ?? `could not mint a code (HTTP ${res.status})`);
         return;
       }
+      // Baseline from a FRESH read, not from what is on screen. The rendered list
+      // is as old as the last poll, and starting one device behind would make the
+      // watcher below declare success the moment it looked.
+      const before = await fetchDevices();
+      if (before) {
+        baselineRef.current = before.devices.length;
+        setDevices(before.devices);
+        setThisDevice(before.thisDevice);
+      }
       setEnrollment(data as Enrollment);
       setNow(Date.now());
     } catch (e) {
@@ -120,7 +165,7 @@ export function HostDevicesSection({
     } finally {
       setMinting(false);
     }
-  }, [publicBaseUrl]);
+  }, [publicBaseUrl, fetchDevices]);
 
   const copyLink = useCallback(async () => {
     if (!enrollment) return;
@@ -134,10 +179,12 @@ export function HostDevicesSection({
   const revoke = useCallback(async (deviceId: string) => {
     try {
       await fetch(`/api/host-device/${encodeURIComponent(deviceId)}/revoke`, { method: "POST" });
-      // Revoking the device you are ON logs this browser out, so reload rather
-      // than leaving a shell that will 401 on its next click.
+      // Revoking the device you are ON clears this browser's cookie, so a reload
+      // would render the host shell backed by a credential that no longer exists:
+      // every request 403s and it just looks broken. Go to the terminal signed-out
+      // page instead — the same trap, and the same escape, as a peer leaving.
       if (deviceId === thisDevice) {
-        window.location.reload();
+        window.location.replace("/left?as=device");
         return;
       }
       void refresh();
@@ -184,6 +231,12 @@ export function HostDevicesSection({
           {minting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Smartphone className="w-3 h-3" />}
           Add a device
         </Button>
+      )}
+
+      {justAdded && (
+        <p className="mt-2 text-[11px] text-wrap leading-relaxed" role="status">
+          {justAdded} was added. It acts as you now.
+        </p>
       )}
 
       {expired && (
