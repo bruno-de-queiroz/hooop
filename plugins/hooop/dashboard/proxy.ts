@@ -81,35 +81,87 @@ function passthrough(req: NextRequest, rid: string, participant: string, peerSes
 const SIGNED_OUT_PATH = "/left";
 
 /**
- * THE access check, in the one place that sees every request.
+ * The strongest LIVE credential this request carries.
  *
- * A signed peer or device token stays cryptographically valid after the grant
- * behind it is revoked, so the signature checks above prove issuance and nothing
- * more. Only the sandbox knows whether a grant is still live, and this is where it
- * is asked — once, for pages and API routes alike.
+ * "Strongest" is why the device is looked at first: a browser can legitimately
+ * hold both cookies (you paired yourself into a session, then later enrolled the
+ * same phone), and being pinned to one session as a guest is not what somebody who
+ * just enrolled their own phone asked for.
  *
- * It lives here rather than in the routes because it was in the routes: a helper
- * each one had to remember to call, which two thirds of them did not, so a revoked
- * peer kept reading files, previews, skills and agents while the guarded routes
- * correctly refused them. A rule that can be forgotten will be. The proxy's
- * matcher covers everything, so nothing can opt out by omission.
+ * LIVE is the part that was missing, and it produced a real bug. Revocation is
+ * invisible at the signature layer — a revoked token verifies perfectly — so
+ * "prefer the device cookie" meant a REVOKED device shadowed a working peer
+ * cookie: enrol a phone, revoke it, then join that same phone as a guest, and it
+ * was refused as a dead device without the peer cookie ever being consulted. The
+ * rule is therefore "the strongest credential that is still good", not "the
+ * strongest credential presented".
  *
- * Returns null to continue, or the response to send instead.
+ * A dead credential is also reported so the caller can clear its cookie. Device
+ * ids and share ids are never reused, so a revoked one is dead forever and there
+ * is nothing to preserve by keeping it — leaving it in the jar just means it
+ * shadows again on the next request.
  */
-async function refuseIfRevoked(
+type Credential = { stale: string[] } & (
+  | { kind: "device"; did: string }
+  | { kind: "peer"; peer: PeerTokenPayload }
+  /** Held one, it is gone. `participant` names which, so the message matches. */
+  | { kind: "revoked"; participant: string }
+  | { kind: "none" }
+);
+
+async function resolveCredential(req: NextRequest): Promise<Credential> {
+  // Cookies the sandbox has already forgotten. Collected even when the request
+  // SUCCEEDS on another credential: a dead cookie left in the jar shadows again on
+  // the next request, and every request after that pays two probes to work around
+  // it. Ids are never reused, so there is nothing to preserve by keeping it.
+  const stale: string[] = [];
+  const device = await resolveHostDevice(req);
+  const peer = await resolvePeer(req);
+  let deadParticipant: string | null = null;
+
+  if (device) {
+    const participant = `host:${device.did}`;
+    if (await grantIsLive(participant)) return { kind: "device", did: device.did, stale };
+    stale.push(HOST_DEVICE_COOKIE);
+    deadParticipant = participant;
+  }
+  if (peer) {
+    const participant = `peer:${peer.sid}`;
+    if (await grantIsLive(participant)) return { kind: "peer", peer, stale };
+    stale.push(PEER_COOKIE);
+    // Both gone: report the device, the stronger of the two claims.
+    deadParticipant ??= participant;
+  }
+  return deadParticipant
+    ? { kind: "revoked", participant: deadParticipant, stale }
+    : { kind: "none", stale };
+}
+
+/** Drop credentials the sandbox has already forgotten, so they stop being
+ *  presented (and stop shadowing a good one) on every later request. */
+function clearStale(res: NextResponse, stale: readonly string[]): NextResponse {
+  for (const name of stale) res.cookies.set({ name, value: "", path: "/", maxAge: 0 });
+  return res;
+}
+
+/**
+ * Where a PAGE request goes when the credential behind it has been revoked.
+ *
+ * Somewhere that explains itself, rather than the shell: rendering would show the
+ * host's empty new-session form, since every request behind it is refused, which
+ * reads as the app being broken instead of as access having ended.
+ *
+ * Returns null only for the signed-out page itself, which has to stay reachable —
+ * it is where this points, so gating it would loop forever.
+ *
+ * (API requests get a plain 403 at the call site. They have no shell to protect
+ * and a redirect would just confuse a fetch.)
+ */
+function signedOutRedirect(
   req: NextRequest,
   rid: string,
   participant: string,
-): Promise<NextResponse | null> {
-  if (await grantIsLive(participant)) return null;
-
-  const reason = revokedReason(participant);
-  if (req.nextUrl.pathname.startsWith("/api/")) {
-    return jsonError(403, reason, rid);
-  }
-  // A page gets sent somewhere that explains itself. Rendering the shell would
-  // show the host's empty new-session form (every request behind it refused),
-  // which reads as the app being broken rather than as access having ended.
+): NextResponse | null {
   if (req.nextUrl.pathname === SIGNED_OUT_PATH) return null;
   const url = req.nextUrl.clone();
   url.pathname = SIGNED_OUT_PATH;
@@ -167,27 +219,28 @@ async function authorizePage(req: NextRequest, rid: string): Promise<NextRespons
   const host = req.headers.get("host");
   const expected = dashboardTokenFromEnv();
 
-  // Enrolled-device path, checked BEFORE the peer path. A browser can hold both
-  // cookies (you paired yourself into a session, then later enrolled the same
-  // phone as a device), and when it does, the device wins: it is the stronger
-  // claim, it is the more recent deliberate act, and being pinned to one session
-  // as a guest is not what somebody who just enrolled their own phone asked for.
-  const device = await resolveHostDevice(req);
-  if (device && !isAllowedHost(host)) {
-    const participant = `host:${device.did}`;
-    const refused = await refuseIfRevoked(req, rid, participant);
-    if (refused) return refused;
+  // Whichever credential is both strongest and still good (see resolveCredential).
+  const cred: Credential = !isAllowedHost(host)
+    ? await resolveCredential(req)
+    : { kind: "none", stale: [] };
+
+  if (cred.kind === "revoked") {
+    // Clear on the way out — including on the signed-out page itself, which stays
+    // reachable, so the browser stops presenting a credential the sandbox has
+    // forgotten.
+    const refused = signedOutRedirect(req, rid, cred.participant);
+    return clearStale(refused ?? passthrough(req, rid, "none"), cred.stale);
+  }
+
+  if (cred.kind === "device") {
     // Emphatically NOT the install cookie — the device authenticates with its own
     // revocable token, so a stolen phone costs you that device and not the
     // install. Everything else about being the host is identical.
-    return passthrough(req, rid, participant);
+    return clearStale(passthrough(req, rid, `host:${cred.did}`), cred.stale);
   }
 
-  // Peer path: a verified peer cookie bound to this (tunnel) host.
-  const peer = await resolvePeer(req);
-  if (peer && !isAllowedHost(host)) {
-    const refusedPeer = await refuseIfRevoked(req, rid, `peer:${peer.sid}`);
-    if (refusedPeer) return refusedPeer;
+  if (cred.kind === "peer") {
+    const peer = cred.peer;
     // A peer is locked to exactly one session. On the bare root:
     //  - no session selected → redirect to their bound session (don't show the
     //    host's create-session shell). The redirect carries the param, so it
@@ -210,7 +263,7 @@ async function authorizePage(req: NextRequest, rid: string): Promise<NextRespons
     }
     // Do NOT set the install cookie. Tell the layout to emit the peer token,
     // and pin the peer to their bound session.
-    return passthrough(req, rid, `peer:${peer.sid}`, peer.ses, peer.cap);
+    return clearStale(passthrough(req, rid, `peer:${peer.sid}`, peer.ses, peer.cap), cred.stale);
   }
 
   // Host path: only on the localhost allowlist do we mint/refresh the install
@@ -279,42 +332,39 @@ async function authorizeApi(req: NextRequest, rid: string): Promise<NextResponse
     return jsonError(403, "host not allowed", rid);
   }
 
-  // Enrolled device first (see authorizePage for why it outranks a peer cookie).
-  // A device cookie that fails validation is not fatal on its own: if this
-  // browser also holds a peer cookie, it falls through and is served as the guest
-  // it still legitimately is. Only a browser with nothing else is rejected.
-  if (deviceCookie) {
-    const device = await resolveHostDevice(req);
-    if (device) {
-      const refused = await refuseIfRevoked(req, rid, `host:${device.did}`);
-      if (refused) return refused;
-      if (!isSameOrigin(req)) {
-        return jsonError(403, "cross-origin requests are not allowed", rid);
-      }
-      if (!SAFE_METHODS.has(req.method)) {
-        const rate = mutatingRequestLimiter.check(deviceCookie);
-        if (!rate.ok) return rateLimited(rid, rate.resetSec);
-        // Same double-submit rule as the peer path, against the DEVICE cookie:
-        // the header must equal it, so a hostile page that cannot read an
-        // HttpOnly cookie cannot ride along on it. Constant-time, since the
-        // cookie is a signed secret.
-        const headerToken = req.headers.get(TOKEN_HEADER);
-        if (!headerToken || !constantTimeEqualsJs(headerToken, deviceCookie)) {
-          return jsonError(401, "mutating requests require " + TOKEN_HEADER + " header", rid);
-        }
-      }
-      return passthrough(req, rid, `host:${device.did}`);
-    }
-    if (!hasPeerCookie) {
-      return jsonError(401, "missing or invalid auth", rid);
-    }
+  // Whichever credential is both strongest and still good. A dead one does not
+  // sink the request on its own: a browser holding a revoked device cookie AND a
+  // live peer cookie is served as the guest it still legitimately is, and the dead
+  // cookie is cleared so it stops shadowing on the next request.
+  const cred = await resolveCredential(req);
+
+  if (cred.kind === "revoked") {
+    return clearStale(jsonError(403, revokedReason(cred.participant), rid), cred.stale);
   }
-  const peer = await resolvePeer(req);
-  if (!peer) {
+  if (cred.kind === "none") {
     return jsonError(401, "missing or invalid auth", rid);
   }
-  const refusedPeer = await refuseIfRevoked(req, rid, `peer:${peer.sid}`);
-  if (refusedPeer) return refusedPeer;
+
+  if (cred.kind === "device") {
+    if (!isSameOrigin(req)) {
+      return jsonError(403, "cross-origin requests are not allowed", rid);
+    }
+    if (!SAFE_METHODS.has(req.method)) {
+      const rate = mutatingRequestLimiter.check(deviceCookie);
+      if (!rate.ok) return rateLimited(rid, rate.resetSec);
+      // Same double-submit rule as the peer path, against the DEVICE cookie:
+      // the header must equal it, so a hostile page that cannot read an
+      // HttpOnly cookie cannot ride along on it. Constant-time, since the
+      // cookie is a signed secret.
+      const headerToken = req.headers.get(TOKEN_HEADER);
+      if (!headerToken || !constantTimeEqualsJs(headerToken, deviceCookie)) {
+        return jsonError(401, "mutating requests require " + TOKEN_HEADER + " header", rid);
+      }
+    }
+    return clearStale(passthrough(req, rid, `host:${cred.did}`), cred.stale);
+  }
+
+  const peer = cred.peer;
   if (!isSameOrigin(req)) {
     return jsonError(403, "cross-origin requests are not allowed", rid);
   }
@@ -331,7 +381,7 @@ async function authorizeApi(req: NextRequest, rid: string): Promise<NextResponse
       return jsonError(401, "mutating requests require " + TOKEN_HEADER + " header", rid);
     }
   }
-  return passthrough(req, rid, `peer:${peer.sid}`, peer.ses, peer.cap);
+  return clearStale(passthrough(req, rid, `peer:${peer.sid}`, peer.ses, peer.cap), cred.stale);
 }
 
 /**

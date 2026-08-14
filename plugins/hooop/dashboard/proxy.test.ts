@@ -769,6 +769,96 @@ describe("proxy — revocation, checked once for everything", () => {
     expect(res.status).toBe(200);
   });
 
+  it("serves a browser whose DEVICE was revoked but whose PEER share is live", async () => {
+    // The reported sequence: add a device, revoke it, then join that same browser
+    // as a guest and be admitted. Preferring the device cookie unconditionally
+    // meant the revoked one shadowed the good peer cookie — the peer was refused
+    // as a dead device, and the peer cookie was never even consulted. Revocation is
+    // invisible to a signature check, so "prefer the device" has to mean "prefer a
+    // LIVE device".
+    const dev = await peerToken.signHostDeviceToken({ did: "device-1", host: TUNNEL_HOST }, PEER_SECRET);
+    const peer = await mkPeerToken();
+    vi.doMock("@/lib/sandbox-client", () => ({
+      client: {
+        validateShare: async () => ({ shareId: "share-1", sessionId: "sess-1" }), // live
+        hostDeviceLive: async () => null,                                          // revoked
+      },
+    }));
+    vi.resetModules();
+    const fresh = await import("./proxy");
+
+    const res = await fresh.proxy(new NextRequest(`https://${TUNNEL_HOST}/api/sessions`, {
+      headers: {
+        host: TUNNEL_HOST,
+        origin: `https://${TUNNEL_HOST}`,
+        cookie: `hooop_peer=${peer}; hooop_host_device=${dev}`,
+      },
+    }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBe("peer:share-1");
+    // And the dead cookie is dropped, so it cannot shadow again on the next request.
+    expect(res.headers.get("set-cookie") ?? "").toContain("hooop_host_device=;");
+  });
+
+  it("still refuses a revoked device when there is nothing else to fall back to", async () => {
+    live = false;
+    const dev = await peerToken.signHostDeviceToken({ did: "device-1", host: TUNNEL_HOST }, PEER_SECRET);
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/api/sessions`, {
+      headers: { host: TUNNEL_HOST, origin: `https://${TUNNEL_HOST}`, cookie: `hooop_host_device=${dev}` },
+    }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get("set-cookie") ?? "").toContain("hooop_host_device=;");
+  });
+
+  it("prefers the device when BOTH are live", async () => {
+    // The original rule still holds: enrolling your phone after pairing it in
+    // should promote it, not leave it pinned to one session as a guest.
+    const dev = await peerToken.signHostDeviceToken({ did: "device-1", host: TUNNEL_HOST }, PEER_SECRET);
+    const peer = await mkPeerToken();
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/api/sessions`, {
+      headers: {
+        host: TUNNEL_HOST,
+        origin: `https://${TUNNEL_HOST}`,
+        cookie: `hooop_peer=${peer}; hooop_host_device=${dev}`,
+      },
+    }));
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBe("host:device-1");
+  });
+
+  it("falls back on a PAGE request too, instead of bouncing the peer to /left", async () => {
+    const dev = await peerToken.signHostDeviceToken({ did: "device-1", host: TUNNEL_HOST }, PEER_SECRET);
+    const peer = await mkPeerToken();
+    vi.doMock("@/lib/sandbox-client", () => ({
+      client: {
+        validateShare: async () => ({ shareId: "share-1", sessionId: "sess-1" }),
+        hostDeviceLive: async () => null,
+      },
+    }));
+    vi.resetModules();
+    const fresh = await import("./proxy");
+
+    const res = await fresh.proxy(new NextRequest(`https://${TUNNEL_HOST}/?session=sess-1`, {
+      headers: { host: TUNNEL_HOST, cookie: `hooop_peer=${peer}; hooop_host_device=${dev}` },
+    }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBe("peer:share-1");
+  });
+
+  it("refuses when BOTH grants are gone, naming the device", async () => {
+    live = false;
+    const dev = await peerToken.signHostDeviceToken({ did: "device-1", host: TUNNEL_HOST }, PEER_SECRET);
+    const peer = await mkPeerToken();
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/api/sessions`, {
+      headers: {
+        host: TUNNEL_HOST,
+        origin: `https://${TUNNEL_HOST}`,
+        cookie: `hooop_peer=${peer}; hooop_host_device=${dev}`,
+      },
+    }));
+    expect(res.status).toBe(403);
+    expect((await res.json()) as { error: string }).toMatchObject({ error: "device revoked" });
+  });
+
   it("never probes for the host at the machine", async () => {
     // Their authority is the install cookie: nothing to revoke, so a round trip
     // per request would be pure cost.

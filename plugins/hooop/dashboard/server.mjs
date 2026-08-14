@@ -199,7 +199,7 @@ function verifyPeerToken(token) {
 // Resolve the participant for a WS upgrade. Returns {kind:"host"} |
 // {kind:"peer", ses, allowed:Set} | null. Same-origin enforced (the cookies are
 // SameSite=Strict, so a cross-site WS wouldn't carry them anyway).
-function authUpgrade(req) {
+async function authUpgrade(req) {
   const host = normHost(req.headers.host);
   const origin = req.headers.origin;
   if (origin) {
@@ -216,10 +216,17 @@ function authUpgrade(req) {
   // asked for. `kind === "host"` is required, so a peer token dropped into this
   // cookie resolves to nothing; without that check the two credentials would be
   // interchangeable, since they share a signing secret.
+  //
+  // "Strongest" has to mean "strongest that is still LIVE", though. A revoked
+  // token still verifies, so preferring the device unconditionally meant a revoked
+  // device shadowed a working peer cookie: enrol a phone, revoke it, then join that
+  // same phone as a guest, and it was denied the live feed as a dead device with
+  // the peer cookie never consulted. Hence the await here rather than in the
+  // caller — falling through needs the answer before we choose.
   const deviceTok = cookies[HOST_DEVICE_COOKIE];
   if (deviceTok) {
     const d = verifyPeerToken(deviceTok);
-    if (d && d.kind === "host" && d.host === host && d.did) {
+    if (d && d.kind === "host" && d.host === host && d.did && (await deviceLive(d.did))) {
       return { kind: "host", did: d.did };
     }
   }
@@ -1615,22 +1622,19 @@ server.on("upgrade", (req, socket, head) => {
     socket.destroy();
     return;
   }
-  const scope = authUpgrade(req);
-  if (!scope) {
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-    socket.destroy();
-    return;
-  }
-  // A peer's share — or an enrolled device's grant — must still be live to open
-  // the feed. A revoked credential can't reconnect to keep watching, whichever
-  // kind it is. The host at the machine has nothing to re-check: their authority
-  // is the install cookie, not a revocable grant.
-  const gate = scope.kind === "peer"
-    ? shareLive(scope.sid)
-    : scope.did
-      ? deviceLive(scope.did)
-      : Promise.resolve(true);
-  gate.then((live) => {
+  void (async () => {
+    const scope = await authUpgrade(req);
+    if (!scope) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    // A peer's share must still be live to open the feed — a revoked link can't
+    // reconnect to keep watching. A device's grant was already checked inside
+    // authUpgrade, because whether it is live decides WHICH credential we resolve
+    // to; the host at the machine has nothing to re-check, their authority being the
+    // install cookie rather than a revocable grant.
+    const live = scope.kind === "peer" ? await shareLive(scope.sid) : true;
     if (!live) {
       try { socket.write("HTTP/1.1 403 Forbidden\r\n\r\n"); socket.destroy(); } catch {}
       return;
@@ -1643,7 +1647,7 @@ server.on("upgrade", (req, socket, head) => {
       ws.on("close", () => { clearInterval(ping); clients.delete(client); });
       ws.on("error", () => { clearInterval(ping); clients.delete(client); });
     });
-  });
+  })().catch(() => { try { socket.destroy(); } catch { /* ignore */ } });
 });
 
 // Drop live feeds whose grant got revoked mid-session. Poll every 5s and close
