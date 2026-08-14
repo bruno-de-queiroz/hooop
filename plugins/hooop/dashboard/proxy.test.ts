@@ -602,6 +602,45 @@ describe("proxy — enrolled host device path", () => {
     expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBe("host:device-1");
   });
 
+  it("rejects a CROSS-ORIGIN device request", async () => {
+    // Untested until now, which meant this property rested on somebody reading the
+    // function rather than on anything failing if it regressed.
+    const t = await mkDeviceToken();
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/api/sessions`, {
+      method: "GET",
+      headers: {
+        host: TUNNEL_HOST,
+        origin: "https://evil.example.com",
+        cookie: `hooop_host_device=${t}`,
+      },
+    }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBeNull();
+  });
+
+  it("rate-limits a device's mutating requests, keyed on its own cookie", async () => {
+    const limiter = rateLimit.createRateLimiter({ max: 2, windowMs: 60_000 });
+    originalCheck = rateLimit.mutatingRequestLimiter.check;
+    rateLimit.mutatingRequestLimiter.check = (k: string) => limiter.check(k);
+
+    const t = await mkDeviceToken();
+    const post = () => mod.proxy(deviceReq({
+      method: "POST", pathname: "/api/sessions/sess-1/message",
+      cookie: `hooop_host_device=${t}`, dashboardHeader: t,
+    }));
+    expect((await post()).status).toBe(200);
+    expect((await post()).status).toBe(200);
+    expect((await post()).status).toBe(429);
+
+    // A different device has its own budget: the key is the cookie, not the host.
+    const other = await mkDeviceToken({ did: "device-2" });
+    const res = await mod.proxy(deviceReq({
+      method: "POST", pathname: "/api/sessions/sess-1/message",
+      cookie: `hooop_host_device=${other}`, dashboardHeader: other,
+    }));
+    expect(res.status).toBe(200);
+  });
+
   it("device mutation requires the double-submit header equal to the device cookie", async () => {
     const t = await mkDeviceToken();
     const noHeader = await mod.proxy(deviceReq({

@@ -29,6 +29,7 @@ beforeEach(async () => {
   mod = await import("./route");
   rateLimit = await import("@/lib/rate-limit");
   rateLimit.enrollAttemptLimiter.reset();
+  rateLimit.enrollAttemptCeiling.reset();
 });
 
 function enrollReq(body: unknown, ip = "203.0.113.1"): Request {
@@ -174,6 +175,28 @@ describe("POST /api/host-device/enroll", () => {
     // A different client still gets its own budget.
     const other = await mod.POST(enrollReq({ code: "ABCDEFGH" }, "198.51.100.7"));
     expect(other.status).not.toBe(429);
+  });
+
+  it("holds a ceiling that a spoofed client key cannot rotate past", async () => {
+    // The per-IP key is CF-Connecting-IP: authoritative behind the tunnel, pure
+    // client input anywhere else. Since this endpoint is reachable before any host
+    // check, an attacker on a LAN-bound install rotates it per request and the
+    // per-IP budget stops existing. The install-wide ceiling is what still bites.
+    redeemMock.mockResolvedValue(null);
+    let last = 0;
+    for (let i = 0; i < 70; i++) {
+      last = (await mod.POST(enrollReq({ code: `GUESS${i}` }, `198.51.100.${i % 200}`))).status;
+    }
+    expect(last).toBe(429);
+  });
+
+  it("the ceiling is far above anything a person does", async () => {
+    // A human mistyping a code a few times must never meet it.
+    redeemMock.mockResolvedValue(null);
+    for (let i = 0; i < 5; i++) {
+      const res = await mod.POST(enrollReq({ code: `TYPO${i}` }, `198.51.100.${i}`));
+      expect(res.status).toBe(401);
+    }
   });
 
   it("refuses when sharing is not configured", async () => {

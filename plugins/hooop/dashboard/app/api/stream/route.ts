@@ -1,6 +1,6 @@
 import { client } from "@/lib/sandbox-client";
 import { presenceBus, listPresence } from "@/lib/presence";
-import { isHost } from "@/lib/peer-auth";
+import { isHost, hostDeviceId } from "@/lib/peer-auth";
 import { errorResponse } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
@@ -16,9 +16,23 @@ export const dynamic = "force-dynamic";
  * which connects as the host over loopback and re-broadcasts per-peer-scoped
  * frames on /api/ws. A peer must never read this directly — that would leak
  * other sessions' activity — so refuse anyone who isn't the host.
+ *
+ * The INSTALL host specifically, not an enrolled device, even though a device is
+ * the host everywhere else. Two reasons, and the second is the load-bearing one:
+ *
+ *   1. There is nothing here for a device to want. Its browser reads /api/ws like
+ *      every other viewer; this endpoint has exactly one consumer, over loopback,
+ *      and it is not a browser.
+ *   2. Revocation cannot reach an open stream. Every other path a device takes is
+ *      re-checked per request (the proxy) or reaped within seconds (the live
+ *      feed); an SSE response held open indefinitely is neither, so a device
+ *      revoked mid-stream would keep receiving every session's events until the
+ *      process restarted. Refusing the capability is a smaller thing to get right
+ *      than policing a long-lived connection, so the firehose stays with the
+ *      credential that has no revocation to enforce in the first place.
  */
 export async function GET(request: Request) {
-  if (!isHost(request)) {
+  if (!isHost(request) || hostDeviceId(request)) {
     return errorResponse("forbidden: live event stream is host-only", 403);
   }
   // instrumentation-node.ts is supposed to call client.boot() at server

@@ -7,7 +7,7 @@ import {
   signHostDeviceToken,
   verifyHostDeviceToken,
 } from "@/lib/peer-token";
-import { enrollAttemptLimiter } from "@/lib/rate-limit";
+import { enrollAttemptLimiter, enrollAttemptCeiling } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,11 +61,20 @@ export async function POST(req: Request) {
   const secret = peerSigningSecret();
   if (!secret) return errorResponse("device enrollment is not configured", 503);
 
+  // Per-caller first, then install-wide. The second is the one that holds when the
+  // first is defeated: its key comes from the caller, the ceiling's does not.
   const rate = enrollAttemptLimiter.check(clientKey(req));
-  if (!rate.ok) {
+  const ceiling = enrollAttemptCeiling.check("all");
+  if (!rate.ok || !ceiling.ok) {
     return new NextResponse(
       JSON.stringify({ error: "too many attempts; wait a moment and try again" }),
-      { status: 429, headers: { "Content-Type": "application/json", "Retry-After": String(rate.resetSec) } },
+      {
+        status: 429,
+        headers: {
+          "Content-Type": "application/json",
+          "Retry-After": String(!rate.ok ? rate.resetSec : ceiling.ok ? 60 : ceiling.resetSec),
+        },
+      },
     );
   }
 

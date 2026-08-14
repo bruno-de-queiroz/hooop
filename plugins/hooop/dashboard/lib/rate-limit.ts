@@ -76,3 +76,23 @@ export const enrollAttemptLimiter: RateLimiter = createRateLimiter({
   max: 10,
   windowMs: 60_000,
 });
+
+/**
+ * The same attempts again, counted install-wide with no key at all.
+ *
+ * Because the per-IP key is not ours: it comes from `CF-Connecting-IP`, which is
+ * authoritative behind the tunnel and pure client input anywhere else. The
+ * enrollment endpoint is allowlisted BEFORE the host check (it must be — the phone
+ * has no credential yet), so on an install bound to 0.0.0.0 somebody on the LAN
+ * can rotate that header per request and the per-IP budget stops existing.
+ *
+ * This one cannot be rotated. It is set far above any legitimate use — nobody
+ * types sixty codes a minute — so it never touches a real person, and it puts a
+ * real ceiling on guessing regardless of what the caller claims to be. The code
+ * space (31^8 ≈ 8.5e11, single-use, two-minute window) was always the actual
+ * defence; this is what makes the rate limit part of the argument true.
+ */
+export const enrollAttemptCeiling: RateLimiter = createRateLimiter({
+  max: 60,
+  windowMs: 60_000,
+});
