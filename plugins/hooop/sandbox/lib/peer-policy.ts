@@ -57,10 +57,16 @@ const ENV_DUMP_PATTERNS: RegExp[] = [
   /(^|[;&|]\s*)env\s*($|[|>])/i,
 ];
 
-// Irreversible / high-blast-radius commands. In auto mode (and the sandbox Bash
-// fast-lane) these keep prompting the host instead of running silently. Broad on
-// purpose — a false positive only routes a command to a host approval, never
-// runs something it shouldn't.
+// Irreversible / high-blast-radius commands. In auto mode — and on the `!bash`
+// fast lane when a GUEST is driving it — these prompt the host instead of running
+// silently. Broad on purpose: a false positive only routes a command to a host
+// approval, never runs something it shouldn't.
+//
+// The fast-lane half of that sentence was aspirational for a while. peerBashAllowed
+// (below) covers git push, secrets and env dumps, and nothing consulted this list,
+// so a full share could `!rm -rf` straight past the model and the gate. The bash
+// route now asks isCriticalBash and raises a host-only card; this note is here
+// because the list's reach is not obvious from the list.
 const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /\brm\s+(-[a-z]*\s+)*-[a-z]*[rf][a-z]*/i, // rm -rf, rm -fr, rm -r -f, …
   /\brmdir\b/i,

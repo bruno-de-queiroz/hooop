@@ -961,6 +961,12 @@ describe("stdout parser: control_request (permission ask)", () => {
     expect(pending[0].toolUseId).toBe("tu-1");
     expect(pending[0].decisionReason).toBe("writes to /tmp");
     expect(pending[0].input).toEqual({ command: "rm -rf /tmp/foo" });
+    // Stamped HERE too, not only on the hook-gate path. This frame comes straight
+    // from the subprocess and becomes a card as-is, so an unstamped ask would read
+    // as routine to the permission route and let a full-capability peer approve
+    // their own turn's `rm -rf`. A fail-open with no symptom: the card still
+    // appears, it just accepts the wrong person's answer.
+    expect(pending[0].critical).toBe(true);
 
     // An event was ingested with hook=PermissionRequest.
     const ingestCalls = ingestEventLineMock.mock.calls.map((c) => JSON.parse(c[0] as string));
@@ -970,6 +976,50 @@ describe("stdout parser: control_request (permission ask)", () => {
     expect(permEvent.ctx.request_id).toBe("req-1");
 
     void pendingId;
+  });
+
+  it("leaves a routine control_request ask unflagged, so a full peer still decides it", async () => {
+    // The other direction. Flagging everything would take co-driving away instead
+    // of fixing the dangerous case.
+    //
+    // A REAL directory, for the reason the auto-mode block spells out: containment
+    // fails closed on a cwd that cannot be canonicalized, so a placeholder cwd
+    // makes EVERY path critical and would let this test pass for the wrong reason.
+    const realCwd = fsMock.realFs!.mkdtempSync(join(tmpdir(), "ctl-routine-"));
+    await mod.startNewConversation({ cwd: realCwd });
+    const child = shared.children[shared.children.length - 1];
+    (child.stdout as any).pushLine({ type: "system", subtype: "init", session_id: "real-routine" });
+    await flush();
+    (child.stdout as any).pushLine({
+      type: "control_request",
+      request_id: "req-routine",
+      session_id: "real-routine",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Write",
+        input: { file_path: join(realCwd, "notes.md"), content: "hi" },
+      },
+    });
+    await flush();
+    const row = mod.getPendingRequests("real-routine").find((r) => r.requestId === "req-routine");
+    expect(row).toBeDefined();
+    expect(row!.critical ?? false).toBe(false);
+  });
+
+  it("flags a git command arriving by the control protocol", async () => {
+    await mod.startNewConversation({ cwd: "/workspace" });
+    const child = shared.children[shared.children.length - 1];
+    (child.stdout as any).pushLine({ type: "system", subtype: "init", session_id: "real-git" });
+    await flush();
+    (child.stdout as any).pushLine({
+      type: "control_request",
+      request_id: "req-git",
+      session_id: "real-git",
+      request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "git push origin main" } },
+    });
+    await flush();
+    const row = mod.getPendingRequests("real-git").find((r) => r.requestId === "req-git");
+    expect(row!.critical).toBe(true);
   });
 
   it("ignores control_request frames without a can_use_tool subtype", async () => {

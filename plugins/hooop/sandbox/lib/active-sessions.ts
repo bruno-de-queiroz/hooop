@@ -3006,6 +3006,12 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
               author: slot.currentTurn?.author ?? "host",
               shareId: slot.currentTurn?.shareId ?? null,
             };
+            // The OTHER birthplace of an ask. Everything the hook gate decides is
+            // irrelevant here — this frame arrives straight from the subprocess and
+            // becomes a card as-is — so criticality has to be stamped here too, or
+            // the permission route sees an unflagged ask and lets a full peer
+            // answer their own turn's destructive command.
+            markCritical(pending, slot.meta.cwd);
             slot.pendingRequests.push(pending);
             const eventLine = JSON.stringify({
               ts: new Date().toISOString(),
@@ -4367,6 +4373,27 @@ async function runPageTool(
   }
 }
 
+/**
+ * Stamp `pending.critical` — the single answer to "is this ask the host's alone?".
+ *
+ * A function rather than an expression because there are TWO places a pending
+ * request is born: the hook gate (createPermissionRequest, below) and the
+ * subprocess's own `control_request`/`can_use_tool` frame (see the stdout reader).
+ * The second one bypasses the first entirely, so stamping only where the gate
+ * happens to compute it left every ask arriving by the control protocol unflagged —
+ * and an unflagged ask reads as routine, which hands `rm -rf` back to the
+ * full-capability peer the flag exists to keep away from it. A fail-open with no
+ * symptom: the card still appears, it just accepts the wrong person's answer.
+ */
+function markCritical(pending: PendingPermissionRequest, cwd: string | null): boolean {
+  pending.critical =
+    isCriticalTool(pending.toolName, pending.input, cwd) ||
+    // Publishing agent-written code to a public URL is a human decision every
+    // time, in every mode — and the host's, not a guest's.
+    previewToolAction(pending.toolName) === "share";
+  return pending.critical;
+}
+
 export function createPermissionRequest(opts: {
   sessionId: string;
   toolName: string;
@@ -4374,6 +4401,15 @@ export function createPermissionRequest(opts: {
   toolUseId?: string | null;
   requestId?: string | null;
   decisionReason?: string | null;
+  /**
+   * Who to attribute the ask to, when the caller knows better than the current
+   * turn does. Normally an ask arrives mid-turn and the driver IS the attribution,
+   * but the `!bash` shortcut has no turn at all — it bypasses the model — so
+   * without these a guest's `rm -rf` would surface on the host's own card as if the
+   * host had asked for it, and the trust key would be wrong too.
+   */
+  author?: string | null;
+  shareId?: string | null;
 }): { requestId: string; sessionId: string } {
   const slot = getSlot(opts.sessionId);
   const canonicalSid = slot?.meta.sessionId ?? opts.sessionId;
@@ -4392,8 +4428,8 @@ export function createPermissionRequest(opts: {
     input: opts.input,
     decisionReason: opts.decisionReason ?? null,
     receivedAt: Date.now(),
-    author: turn?.author ?? "host",
-    shareId: turn?.shareId ?? null,
+    author: opts.author ?? turn?.author ?? "host",
+    shareId: opts.shareId ?? turn?.shareId ?? null,
     planMode: slot?.planTurnActive === true,
   };
 
@@ -4640,15 +4676,12 @@ export function createPermissionRequest(opts: {
   // that gets reintroduced when a tool has to be remembered in three places.
   // Sharing publishes agent-authored code to a public tunnel URL; that is a
   // decision for a human every time, in every mode.
-  const critical =
-    isCriticalTool(opts.toolName, pending.input, slot?.meta.cwd ?? null) ||
-    previewAction === "share";
-
-  // Stamp it on the request. Everything below decides whether to escalate; this
-  // is what makes the escalation land on the right person once it does — the
-  // permission route reads it to keep a critical ask host-only, and the dashboard
-  // reads it to show a peer a waiting state instead of buttons they must not have.
-  pending.critical = critical;
+  // Stamped on the request, not just computed: everything below decides whether to
+  // escalate, and this is what makes the escalation land on the right person once
+  // it does — the permission route reads it to keep a critical ask host-only, and
+  // the dashboard reads it to show a peer a waiting state instead of buttons they
+  // must not have.
+  const critical = markCritical(pending, slot?.meta.cwd ?? null);
 
   // The ask tool gates those same branches, for a sharper reason than the
   // critical set: an unattended approval of an ask does not merely skip a

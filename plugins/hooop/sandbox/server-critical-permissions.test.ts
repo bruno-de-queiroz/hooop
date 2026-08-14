@@ -86,6 +86,9 @@ interface Ask { requestId: string; toolName: string; input: unknown; critical?: 
 let asks: Ask[] = [];
 const getPendingRequests = vi.fn((_id: string) => asks);
 const respondToPermission = vi.fn(async () => ({ ok: true as const }));
+const createPermissionRequest = vi.fn((_opts: unknown) => ({ requestId: "ask-1", sessionId: "sess-1" }));
+let verdict: { decision: "allow" | "deny" | "timeout"; reason?: string | null } = { decision: "deny", reason: "nope" };
+const awaitPermissionDecision = vi.fn(async () => verdict);
 
 // ---- session registry: controllable status, so dormancy can be simulated ----
 let sessionStatus = "alive";
@@ -114,6 +117,10 @@ vi.mock("./lib/active-sessions", () => ({
   // The ask under test, and the call that would settle it.
   getPendingRequests: (...a: unknown[]) => getPendingRequests(...(a as [string])),
   respondToPermission: (...a: unknown[]) => respondToPermission(...(a as [])),
+  // The `!bash` escalation: raise a card, park on the decision.
+  createPermissionRequest: (opts: unknown) => createPermissionRequest(opts),
+  awaitPermissionDecision: (...a: unknown[]) => awaitPermissionDecision(...(a as [])),
+  peekPermissionDecision: vi.fn(() => undefined),
 }));
 vi.mock("./lib/skills", () => ({ listSkills: () => [], startSkillsWatcher: vi.fn(), stopSkillsWatcher: vi.fn(), skillsBus: new EventEmitter() }));
 vi.mock("./lib/commands", () => ({ listSlashCommands: () => [] }));
@@ -199,6 +206,8 @@ beforeEach(async () => {
   getActiveSession.mockImplementation((id: string) => ({ sessionId: id, cwd: "/tmp", status: sessionStatus }));
   respondToPermission.mockImplementation(async () => ({ ok: true as const }));
   share.capability = "full";
+  verdict = { decision: "deny", reason: "nope" };
+  createPermissionRequest.mockImplementation(() => ({ requestId: "ask-1", sessionId: "sess-1" }));
   // One critical ask and one routine one, side by side in the same session — which
   // is the case that makes this per-request rather than per-viewer.
   asks = [
@@ -312,5 +321,81 @@ describe("standing trust is the host's to grant", () => {
     expect(res.status).toBe(200);
     const [, , , , trustPeer] = respondToPermission.mock.calls[0] as unknown[];
     expect(trustPeer).toBe(true);
+  });
+});
+
+describe("a guest's destructive `!bash` asks the host", () => {
+  // The fast lane bypasses the model AND the permission gate, and peerBashAllowed
+  // only ever covered git push, secrets and env dumps. So the most direct
+  // destructive path in the product — a guest typing `!rm -rf /workspace` — was the
+  // one with nothing in front of it, while peer-policy.ts claimed otherwise.
+  const bash = (command: string, participant: string | null) =>
+    doRequest(srv.socketPath, "POST", "/sessions/sess-1/bash", srv.token, { command }, participant);
+
+  it("raises a card instead of running it, attributed to the GUEST", async () => {
+    const res = await bash("rm -rf /workspace", "peer:share-1");
+    expect(res.status).toBe(403);
+    expect(createPermissionRequest).toHaveBeenCalledTimes(1);
+    const opts = createPermissionRequest.mock.calls[0][0] as {
+      toolName: string; input: { command: string }; author: string; shareId: string | null;
+    };
+    expect(opts.toolName).toBe("Bash");
+    expect(opts.input.command).toBe("rm -rf /workspace");
+    // Attribution matters: there is no turn behind a shortcut, so without this the
+    // guest's command shows on the host's own card as the host's.
+    expect(opts.author).toBe("Ana");
+    expect(opts.shareId).toBe("share-1");
+  });
+
+  it("runs it once the host allows", async () => {
+    verdict = { decision: "allow" };
+    const res = await bash("git --version", "peer:share-1");
+    expect(res.status).toBe(200);
+    expect(createPermissionRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the host DECLINED, using their reason", async () => {
+    verdict = { decision: "deny", reason: "not on my machine" };
+    const res = await bash("rm -rf /workspace", "peer:share-1");
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error).toContain("not on my machine");
+  });
+
+  it("distinguishes 'nobody answered' from 'the host said no'", async () => {
+    // Different sentences, and the guest deserves the accurate one: one means try
+    // again later, the other means stop asking.
+    verdict = { decision: "timeout" };
+    const res = await bash("rm -rf /workspace", "peer:share-1");
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error).toContain("didn't answer");
+  });
+
+  it("does not ask about a ROUTINE guest command", async () => {
+    const res = await bash("echo hello", "peer:share-1");
+    expect(res.status).toBe(200);
+    expect(createPermissionRequest).not.toHaveBeenCalled();
+  });
+
+  it("never asks on the HOST's behalf — they already have a shell", async () => {
+    const res = await bash("rm -rf /workspace/build", "host");
+    expect(res.status).toBe(200);
+    expect(createPermissionRequest).not.toHaveBeenCalled();
+  });
+
+  it("still refuses git push outright, without raising a card", async () => {
+    // The flat denials come first: an approve button for "push to the host's remote"
+    // is a different decision from "delete a build directory", and peerBashAllowed
+    // already answered it.
+    const res = await bash("git push origin main", "peer:share-1");
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error).toContain("host-only");
+    expect(createPermissionRequest).not.toHaveBeenCalled();
+  });
+
+  it("keeps the fast lane closed to a drive share entirely", async () => {
+    share.capability = "drive";
+    const res = await bash("echo hello", "peer:share-1");
+    expect(res.status).toBe(403);
+    expect(createPermissionRequest).not.toHaveBeenCalled();
   });
 });

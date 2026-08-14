@@ -112,7 +112,17 @@ import {
   setCanonicalResolver,
   PushOwnershipError,
 } from "./lib/push";
-import { peerBashAllowed } from "./lib/peer-policy";
+import { peerBashAllowed, isCriticalBash } from "./lib/peer-policy";
+
+/**
+ * How long a guest's destructive `!bash` waits for the host.
+ *
+ * Matches the tool gate's default (HOOOP_PERMISSION_GATE_TIMEOUT_SECONDS, 120s) so
+ * a card raised by the shortcut behaves like every other card, and sits well inside
+ * this route's own 10-minute command cap — the request was always allowed to be
+ * long-lived; now some of that time can be spent waiting for a human.
+ */
+const BASH_SHORTCUT_APPROVAL_MS = 120_000;
 import {
   PreviewError,
   emitPreviewEvent,
@@ -819,6 +829,47 @@ add("POST", "/sessions/:id/bash", async (req, res, params) => {
   if (guard.isPeer) {
     const policy = peerBashAllowed(body.command);
     if (!policy.ok) return err(res, 403, policy.reason ?? "command not allowed for guests");
+  }
+  // ...and the irreversible ones ASK THE HOST rather than running.
+  //
+  // peer-policy.ts has always claimed this ("in auto mode, and the sandbox Bash
+  // fast-lane, these keep prompting the host instead of running silently") and
+  // nothing implemented it: peerBashAllowed covers git push, secrets and env dumps,
+  // not the destructive set. So a full share could type `!rm -rf /workspace` — or
+  // `mkfs`, `dd of=`, `curl … | sh`, `shutdown` — and it ran immediately, with no
+  // model, no card and no host in the loop. The most direct destructive path in the
+  // product was also the only one with nothing in front of it.
+  //
+  // Refusing outright would be the easy fix and the wrong one: a guest with a full
+  // share is someone the host chose to co-drive with, and `rm -rf build` is an
+  // ordinary thing to want. So it becomes a permission card like any other, with
+  // one difference that matters — createPermissionRequest stamps it critical, which
+  // means no unattended mode can approve it (auto mode, approved plan, trusted
+  // peer) and only the HOST can, from their laptop or their phone.
+  if (guard.isPeer && isCriticalBash(body.command)) {
+    const ask = createPermissionRequest({
+      sessionId: meta.sessionId,
+      toolName: "Bash",
+      input: { command: body.command },
+      // There is no turn to attribute this to — the shortcut bypasses the model —
+      // so name the guest explicitly, or their command shows on the host's card as
+      // the host's own.
+      author: guard.author,
+      shareId: guard.shareId,
+      decisionReason: `\`!bash\` shortcut from ${guard.author} — runs directly in the session, without the model`,
+    });
+    const verdict = await awaitPermissionDecision(ask.requestId, BASH_SHORTCUT_APPROVAL_MS);
+    if (verdict.decision !== "allow") {
+      // Timeout reads as "nobody was there", which is a different sentence from
+      // "the host said no" and the guest deserves the accurate one.
+      return err(
+        res,
+        403,
+        verdict.decision === "timeout"
+          ? "waited for the host to approve that command and they didn't answer — ask them directly, or run something less drastic"
+          : verdict.reason || "the host declined that command",
+      );
+    }
   }
   if (body.command.length > 16 * 1024) {
     return err(res, 413, "command too long (>16kb)");
