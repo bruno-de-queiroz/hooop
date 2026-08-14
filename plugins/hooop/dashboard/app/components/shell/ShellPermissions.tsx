@@ -51,7 +51,11 @@ function PermCard({
    * the viewer can't decide (peers who only spectate never see the button). */
   onEnableAuto?: () => Promise<void>;
 }) {
-  const [showInput, setShowInput] = useState(false);
+  // Open by default for a CRITICAL ask. Seen live: the host was asked to approve a
+  // guest's `rm -rf` with the command itself behind a "show input" click. On the one
+  // class of ask that is host-only precisely because it is dangerous, what is being
+  // approved has to be on screen without asking for it.
+  const [showInput, setShowInput] = useState(!!request.critical);
   const [submitting, setSubmitting] = useState<"allow" | "deny" | "always" | "auto" | null>(null);
 
   const inputString = typeof request.input === "string" ? request.input : prettyJson(request.input);
@@ -123,7 +127,14 @@ function PermCard({
           {error && <p className="mt-1 font-mono text-[10px] text-fail">{error}</p>}
 
           <div className="flex items-center gap-1.5 mt-3">
-            {peer && (
+            {/* "Allow all from $peer" and "Auto" are hidden on a CRITICAL ask, and
+               not because they would be unsafe — the critical set is excluded from
+               every unattended approval, so both are honoured correctly. They just
+               read as "stop asking me about this", and the next `rm -rf` will ask
+               again. An affordance that promises quiet and delivers a prompt is
+               worse on this card than on any other, because this is the card where
+               the host is deciding carefully. */}
+            {peer && !request.critical && (
               <button
                 type="button"
                 onClick={() => go("allow", "always")}
@@ -150,7 +161,7 @@ function PermCard({
             >
               {submitting === "allow" ? "allowing…" : "Allow once"}
             </button>
-            {onEnableAuto && !autoModeOn && (
+            {onEnableAuto && !autoModeOn && !request.critical && (
               <button
                 type="button"
                 onClick={goAuto}

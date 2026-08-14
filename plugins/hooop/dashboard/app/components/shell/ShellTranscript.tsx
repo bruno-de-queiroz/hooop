@@ -667,8 +667,20 @@ const BashCard = memo(function BashCard({ row }: { row: EventRow }) {
       <div className="min-w-0 font-mono text-[11px] msg-wide rounded-xl px-3 py-2.5 bg-sunken border border-divider">
         <div className="flex items-baseline gap-1.5">
           <span aria-hidden className="text-fail">$</span>
-          <span className="chip text-[9px] uppercase tracking-wide px-1.5 py-px shrink-0 text-ink-faint">
-            host
+          {/* WHO ran it, not a hardcoded "host". A `!bash` carries its author like
+             any other row, and the chip ignored it — so a guest's command appeared
+             in the transcript as the host's own. Cosmetic until a guest's
+             destructive command started reaching this card by way of the host's
+             approval, at which point the one surface a human reads for "who did
+             that" was naming the wrong person for the commands that matter most. */}
+          <span
+            className={cn(
+              "chip text-[9px] uppercase tracking-wide px-1.5 py-px shrink-0",
+              authorIsHost(row) ? "text-ink-faint" : "text-sdk",
+            )}
+            title={authorIsHost(row) ? "run by the host" : `run by ${row.author}`}
+          >
+            {authorIsHost(row) ? "host" : row.author}
           </span>
           <span className="truncate text-ink-soft">{command}</span>
           {running ? (
