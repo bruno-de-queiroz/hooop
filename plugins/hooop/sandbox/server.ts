@@ -2012,9 +2012,17 @@ add("POST", "/host-devices/enroll-code", async (req, res) => {
  * the entire problem being solved. The code plus the host binding is the proof.
  * The dashboard route in front of this one is the rate limiter. */
 add("POST", "/host-devices/redeem", async (req, res) => {
-  let body: { code?: unknown; publicHost?: unknown; label?: unknown };
+  let body: { code?: unknown; publicHost?: unknown; label?: unknown; supersede?: unknown };
   try { body = await readJson(req, MAX_BYTES_DEFAULT); } catch (e: any) { return err(res, e.status ?? 400, e.message); }
   if (typeof body.code !== "string") return err(res, 400, "missing required field: code");
+  // A device this browser is REPLACING. The dashboard reads it from the old
+  // device cookie and verifies that signature first, so it cannot name somebody
+  // else's grant; and it is only acted on after a successful redeem, which needs a
+  // live single-use code that only the host can mint. Anyone able to reach this
+  // line could already enrol a device with full host authority, so retiring one is
+  // not an escalation — it stops one browser from occupying two slots and walking
+  // the host into "revoke one first" about a phone they added once.
+  const supersede = boundedString(body.supersede, 200);
   const publicHost = boundedString(body.publicHost, 253);
   if (!publicHost) return err(res, 400, "missing required field: publicHost");
   const label = typeof body.label === "string" ? body.label : null;
@@ -2025,6 +2033,12 @@ add("POST", "/host-devices/redeem", async (req, res) => {
   // and sending the device to a stale one drops it on the session list. Null when
   // the session has since gone — the device then lands on the dashboard, which is
   // the honest answer.
+  if (supersede && supersede !== result.device.deviceId) {
+    const dropped = revokeHostDevice(supersede);
+    if (dropped.ok) {
+      log.info("host-devices", "superseded the browser's previous device", { supersede });
+    }
+  }
   const landOn = result.sessionId
     ? getActiveSession(result.sessionId)?.sessionId ?? null
     : null;

@@ -95,7 +95,7 @@ export function ShellCenterPane() {
         body: JSON.stringify({ name: myDisplayName(), viewerId: viewerId() }),
       });
     } catch { /* leave anyway — the cookie clear is best-effort UX */ }
-    window.location.replace("/left");
+    window.location.replace("/left?as=peer");
   }, []);
 
   // Gate on selection ONLY (matching the legacy panel). A freshly-created

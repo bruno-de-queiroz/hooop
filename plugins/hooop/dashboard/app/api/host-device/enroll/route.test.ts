@@ -12,8 +12,7 @@ const redeemMock = vi.fn();
 
 vi.mock("@/lib/sandbox-client", () => ({
   client: {
-    redeemHostEnrollCode: (code: string, host: string, label?: string | null) =>
-      redeemMock(code, host, label),
+    redeemHostEnrollCode: (...a: unknown[]) => redeemMock(...(a as [])),
   },
 }));
 
@@ -95,10 +94,52 @@ describe("POST /api/host-device/enroll", () => {
     expect((await res.json()) as { sessionId: string | null }).toMatchObject({ sessionId: null });
   });
 
+  it("tells the sandbox to retire the device this browser was already holding", async () => {
+    // Re-enrolling the same browser must not leave a second live grant behind, or
+    // the eight-device cap starts refusing the host about a phone they added once.
+    const { signHostDeviceToken } = await import("@/lib/peer-token");
+    const old = await signHostDeviceToken({ did: "device-old", host: TUNNEL_HOST }, PEER_SECRET);
+    redeemMock.mockResolvedValueOnce(DEVICE);
+
+    const r = new Request(`https://${TUNNEL_HOST}/api/host-device/enroll`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        host: TUNNEL_HOST,
+        "cf-connecting-ip": "203.0.113.1",
+        cookie: `hooop_host_device=${old}`,
+      },
+      body: JSON.stringify({ code: "ABCDEFGH" }),
+    });
+    expect((await mod.POST(r)).status).toBe(200);
+    expect(redeemMock).toHaveBeenCalledWith("ABCDEFGH", TUNNEL_HOST, null, "device-old");
+  });
+
+  it("ignores an old cookie bound to a DIFFERENT host", async () => {
+    // A grant from a previous tunnel names a device the sandbox has already
+    // forgotten; passing it would be noise at best.
+    const { signHostDeviceToken } = await import("@/lib/peer-token");
+    const old = await signHostDeviceToken({ did: "device-old", host: "other.trycloudflare.com" }, PEER_SECRET);
+    redeemMock.mockResolvedValueOnce(DEVICE);
+
+    const r = new Request(`https://${TUNNEL_HOST}/api/host-device/enroll`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        host: TUNNEL_HOST,
+        "cf-connecting-ip": "203.0.113.1",
+        cookie: `hooop_host_device=${old}`,
+      },
+      body: JSON.stringify({ code: "ABCDEFGH" }),
+    });
+    await mod.POST(r);
+    expect(redeemMock).toHaveBeenCalledWith("ABCDEFGH", TUNNEL_HOST, null, null);
+  });
+
   it("binds the device to the hostname the request arrived on", async () => {
     redeemMock.mockResolvedValueOnce(DEVICE);
     await mod.POST(enrollReq({ code: "ABCDEFGH" }));
-    expect(redeemMock).toHaveBeenCalledWith("ABCDEFGH", TUNNEL_HOST, null);
+    expect(redeemMock).toHaveBeenCalledWith("ABCDEFGH", TUNNEL_HOST, null, null);
   });
 
   it("gives ONE message for every kind of no", async () => {

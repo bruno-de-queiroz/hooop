@@ -513,3 +513,49 @@ describe("where the device lands", () => {
     expect(sessionId).toBeNull();
   });
 });
+
+describe("superseding a browser's previous device", () => {
+  it("retires the old grant when a re-enrolment names it", async () => {
+    // Re-scanning is what testing looks like, and what a lost cookie looks like.
+    // Without this, each re-scan left another live device behind until the cap
+    // started refusing the host about a phone they had added once.
+    const first = await enrollFully({ label: "phone" });
+    const minted = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST, label: "phone again" });
+    const { code } = JSON.parse(minted.body) as { code: string };
+
+    const redeemed = await doRequest(srv.socketPath, "POST", "/host-devices/redeem", srv.token,
+      { code, publicHost: HOST, supersede: first.deviceId }, null);
+    expect(redeemed.status).toBe(200);
+
+    const list = JSON.parse(
+      (await doRequest(srv.socketPath, "GET", "/host-devices", srv.token)).body,
+    ).devices as Array<{ deviceId: string }>;
+    expect(list).toHaveLength(1);
+    expect(list[0].deviceId).not.toBe(first.deviceId);
+  });
+
+  it("keeps the new device when the named one is already gone", async () => {
+    const minted = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST });
+    const { code } = JSON.parse(minted.body) as { code: string };
+    const redeemed = await doRequest(srv.socketPath, "POST", "/host-devices/redeem", srv.token,
+      { code, publicHost: HOST, supersede: "never-existed" }, null);
+    expect(redeemed.status).toBe(200);
+    expect(JSON.parse(
+      (await doRequest(srv.socketPath, "GET", "/host-devices", srv.token)).body,
+    ).devices).toHaveLength(1);
+  });
+
+  it("cannot be used to retire a device WITHOUT a valid code", async () => {
+    // The whole authorisation for this is the single-use code, which only the host
+    // can mint — and anyone holding one could enrol a full-authority device anyway.
+    const victim = await enrollFully({ label: "someone else's phone" });
+    const res = await doRequest(srv.socketPath, "POST", "/host-devices/redeem", srv.token,
+      { code: "NOTREAL1", publicHost: HOST, supersede: victim.deviceId }, null);
+    expect(res.status).toBe(403);
+    expect(JSON.parse(
+      (await doRequest(srv.socketPath, "GET", "/host-devices", srv.token)).body,
+    ).devices).toHaveLength(1);
+  });
+});

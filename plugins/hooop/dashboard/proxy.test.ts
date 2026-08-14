@@ -876,3 +876,49 @@ describe("proxy — revocation, checked once for everything", () => {
     expect(probed).toBe(false);
   });
 });
+
+describe("proxy — the tunnel is not an app you can just open", () => {
+  // The third and last way to arrive at the host's empty "Start a session" form:
+  // no credential at all. It used to render the shell as nobody, so every request
+  // behind it 403'd and the screen looked broken rather than closed.
+  it("sends a cookieless page request on the tunnel to the signed-out page", async () => {
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/`, {
+      headers: { host: TUNNEL_HOST },
+    }));
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/left");
+    // No variant: this person never had access to lose.
+    expect(res.headers.get("location")).not.toContain("as=");
+  });
+
+  it("drops any query on the way, so it cannot carry a session id", async () => {
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/?session=sess-1`, {
+      headers: { host: TUNNEL_HOST },
+    }));
+    expect(res.headers.get("location")).not.toContain("session=");
+  });
+
+  it("still renders the signed-out page itself", async () => {
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/left`, {
+      headers: { host: TUNNEL_HOST },
+    }));
+    expect(res.status).toBe(200);
+  });
+
+  it("leaves the three pre-credential doors open", async () => {
+    // A guest and a device both arrive holding nothing; if these closed, nobody
+    // could ever get in.
+    for (const pathname of ["/join/share-1", "/enroll"]) {
+      const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}${pathname}`, {
+        headers: { host: TUNNEL_HOST },
+      }));
+      expect(res.status, pathname).toBe(200);
+    }
+  });
+
+  it("leaves the host on localhost completely alone", async () => {
+    const res = await mod.proxy(reqWith({ pathname: "/" }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie") ?? "").toContain("hooop_token=");
+  });
+});

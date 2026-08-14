@@ -5,6 +5,7 @@ import {
   HOST_DEVICE_COOKIE,
   peerSigningSecret,
   signHostDeviceToken,
+  verifyHostDeviceToken,
 } from "@/lib/peer-token";
 import { enrollAttemptLimiter } from "@/lib/rate-limit";
 
@@ -81,12 +82,30 @@ export async function POST(req: Request) {
   const host = normalizeHost(req.headers.get("host"));
   if (!host) return errorResponse(genericErr, 401);
 
+  // Re-enrolling THIS browser replaces its previous grant rather than adding a
+  // second one — the sandbox does the retiring, gated behind the code it just
+  // redeemed. Without it, every re-scan (which is what testing looks like, and
+  // what a lost cookie looks like) left another live device behind, until the
+  // eight-device cap started refusing the host with "revoke one first" about a
+  // phone they only ever added once. The old cookie is proof of which grant to
+  // retire: it is signature-verified and host-bound, so it cannot name somebody
+  // else's device. Best-effort — a failure here must not cost a valid enrollment.
+  const previous = await verifyHostDeviceToken(
+    req.headers.get("cookie")?.match(/hooop_host_device=([^;]+)/)?.[1] ?? "",
+    secret,
+  );
+
   let device: {
     deviceId: string; label: string; publicHost: string;
     expiresAt: number | null; sessionId: string | null;
   } | null;
   try {
-    device = await client.redeemHostEnrollCode(code, host, label);
+    device = await client.redeemHostEnrollCode(
+      code,
+      host,
+      label,
+      previous && previous.host === host ? previous.did : null,
+    );
   } catch {
     return errorResponse("could not complete enrollment", 502);
   }

@@ -304,6 +304,9 @@ export interface SandboxClient {
     code: string,
     publicHost: string,
     label?: string | null,
+    /** A device this same browser is replacing (read from its old cookie), so
+     *  re-enrolling does not leave a second live grant behind. */
+    supersede?: string | null,
   ): Promise<{
     deviceId: string;
     label: string;
@@ -749,9 +752,11 @@ export function createHttpClient(socketPath: string): SandboxClient {
         { publicHost, label: label ?? null, ttlMs: ttlMs ?? null, sessionId: sessionId ?? null },
         participantOpts(participant),
       ),
-    redeemHostEnrollCode: async (code, publicHost, label) => {
+    redeemHostEnrollCode: async (code, publicHost, label, supersede) => {
       try {
-        return await request("POST", "/host-devices/redeem", { code, publicHost, label: label ?? null });
+        return await request("POST", "/host-devices/redeem", {
+          code, publicHost, label: label ?? null, supersede: supersede ?? null,
+        });
       } catch (e: any) {
         // 403 covers every "no" the sandbox gives here (bad code, expired,
         // already used, wrong host, device cap reached). Collapsing them into

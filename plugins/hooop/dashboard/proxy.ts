@@ -266,11 +266,32 @@ async function authorizePage(req: NextRequest, rid: string): Promise<NextRespons
     return clearStale(passthrough(req, rid, `peer:${peer.sid}`, peer.ses, peer.cap), cred.stale);
   }
 
-  // Host path: only on the localhost allowlist do we mint/refresh the install
-  // cookie. On any other host with no peer grant, render but set nothing.
-  if (!expected || !isAllowedHost(host)) {
-    const res = passthrough(req, rid, expected ? "none" : "none");
+  // A page request from the public tunnel carrying NO credential at all. It used
+  // to render the shell as nobody, which meant the host's "Start a session" form
+  // backed by requests that all 403 — the third and last way to arrive at that
+  // broken-looking screen (the other two being a revoked device and a device with
+  // no session to land on). Nothing here is reachable from the internet without a
+  // link, so say that instead of pretending to be an app.
+  //
+  // The three doors that must stay open returned earlier: /join/*, /enroll and the
+  // signed-out page itself.
+  if (!isAllowedHost(host)) {
+    const url = req.nextUrl.clone();
+    url.pathname = SIGNED_OUT_PATH;
+    url.search = "";
+    const res = req.nextUrl.pathname === SIGNED_OUT_PATH
+      ? passthrough(req, rid, "none")
+      : NextResponse.redirect(url);
+    res.headers.set("x-request-id", rid);
     if (!expected) res.headers.set("x-dashboard-token-status", "unconfigured");
+    return res;
+  }
+
+  // Host path: only on the localhost allowlist do we mint/refresh the install
+  // cookie. With no install token configured, render but set nothing.
+  if (!expected) {
+    const res = passthrough(req, rid, "none");
+    res.headers.set("x-dashboard-token-status", "unconfigured");
     return res;
   }
 
