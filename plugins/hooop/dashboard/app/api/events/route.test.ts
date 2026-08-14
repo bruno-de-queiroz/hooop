@@ -6,7 +6,8 @@ const validateShareMock = vi.fn();
 vi.mock("@/lib/sandbox-client", () => ({
   client: {
     listEvents: (opts: unknown) => listEventsMock(opts),
-    // revokedGrantGuard consults this for peer requests; default to a live share.
+    // Revocation is the proxy's job now (see lib/access.ts), not this route's, so
+    // nothing here consults it. Kept mocked because the client is shared.
     validateShare: (...a: unknown[]) => validateShareMock(...a),
   },
 }));
@@ -115,10 +116,7 @@ describe("GET /api/events — peer session scoping (event history is host-only)"
     );
   });
 
-  it("blocks a revoked peer (share gone) with 403 before touching events", async () => {
-    validateShareMock.mockResolvedValue(null); // 404 = revoked/expired
-    const res = await mod.GET(makePeerReq("?session=s1", "s1"));
-    expect(res.status).toBe(403);
-    expect(listEventsMock).not.toHaveBeenCalled();
-  });
+  // "blocks a revoked peer" used to live here, one copy per guarded route — and
+  // the routes that never got a copy were the bug. Revocation is now checked once
+  // in the proxy, so it is asserted once, in proxy.test.ts.
 });

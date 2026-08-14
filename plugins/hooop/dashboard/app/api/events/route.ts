@@ -2,15 +2,11 @@ import { client } from "@/lib/sandbox-client";
 import { clampInt } from "@shared/clamp";
 import { proxy, errorResponse } from "@/lib/api-helpers";
 import { peerSessionId } from "@/lib/peer-auth";
-import { revokedGrantGuard } from "@/lib/peer-live";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const revoked = await revokedGrantGuard(request);
-  if (revoked) return revoked;
-
   const url = new URL(request.url);
   const limit = clampInt(url.searchParams.get("limit"), { min: 1, max: 1000, fallback: 200 });
   const beforeRaw = url.searchParams.get("before");

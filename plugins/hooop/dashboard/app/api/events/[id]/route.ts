@@ -1,15 +1,11 @@
 import { client } from "@/lib/sandbox-client";
 import { proxy, errorResponse } from "@/lib/api-helpers";
 import { peerSessionId } from "@/lib/peer-auth";
-import { revokedGrantGuard } from "@/lib/peer-live";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const revoked = await revokedGrantGuard(request);
-  if (revoked) return revoked;
-
   const { id: rawId } = await params;
   const id = parseInt(rawId, 10);
   if (!Number.isFinite(id)) return errorResponse("invalid id", 400);

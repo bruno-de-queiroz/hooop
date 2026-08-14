@@ -54,10 +54,7 @@ describe("GET /api/events/:id — peer session scoping", () => {
     expect(res.status).toBe(404);
   });
 
-  it("blocks a revoked peer before fetching the event", async () => {
-    validateShareMock.mockResolvedValue(null);
-    const res = await mod.GET(peerReq("s1"), { params });
-    expect(res.status).toBe(403);
-    expect(getEventMock).not.toHaveBeenCalled();
-  });
+  // "blocks a revoked peer" used to live here, one copy per guarded route — and
+  // the routes that never got a copy were the bug. Revocation is now checked once
+  // in the proxy, so it is asserted once, in proxy.test.ts.
 });

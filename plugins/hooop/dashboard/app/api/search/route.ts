@@ -3,7 +3,6 @@ import type { SearchType } from "@/lib/sandbox-types";
 import { parseJsonBody, errorResponse } from "@/lib/api-helpers";
 import { clampInt } from "@shared/clamp";
 import { peerSessionId } from "@/lib/peer-auth";
-import { revokedGrantGuard } from "@/lib/peer-live";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,9 +17,6 @@ function normalizeType(v: unknown): SearchType {
 }
 
 export async function POST(request: Request) {
-  const revoked = await revokedGrantGuard(request);
-  if (revoked) return revoked;
-
   const { body, error } = await parseJsonBody<{
     q?: unknown;
     type?: unknown;

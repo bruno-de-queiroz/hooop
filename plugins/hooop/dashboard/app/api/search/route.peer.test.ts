@@ -53,10 +53,7 @@ describe("POST /api/search — peer session scoping", () => {
     expect(searchMock).toHaveBeenCalledWith("hello", "bm25", 20, "s1");
   });
 
-  it("blocks a revoked peer with 403 before searching", async () => {
-    validateShareMock.mockResolvedValue(null);
-    const res = await mod.POST(req({ q: "hello" }, { session: "s1" }));
-    expect(res.status).toBe(403);
-    expect(searchMock).not.toHaveBeenCalled();
-  });
+  // "blocks a revoked peer" used to live here, one copy per guarded route — and
+  // the routes that never got a copy were the bug. Revocation is now checked once
+  // in the proxy, so it is asserted once, in proxy.test.ts.
 });

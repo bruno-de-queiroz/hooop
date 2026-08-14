@@ -684,3 +684,105 @@ describe("proxy — enrolled host device path", () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe("proxy — revocation, checked once for everything", () => {
+  // A signed token stays cryptographically valid after the grant behind it is
+  // revoked, so every check above proves issuance and nothing more. This is the
+  // one place that asks the sandbox whether the grant is still live — which is why
+  // it is the one place worth testing for it. It used to be a helper each route
+  // remembered to call, and the two thirds of routes that never called it were the
+  // hole: a revoked peer kept reading files, previews, skills and agents.
+  let access: typeof import("./lib/access");
+  let live: boolean;
+
+  beforeEach(async () => {
+    live = true;
+    vi.doMock("@/lib/sandbox-client", () => ({
+      client: {
+        validateShare: async () => (live ? { shareId: "share-1", sessionId: "sess-1" } : null),
+        hostDeviceLive: async () => (live ? { deviceId: "device-1", label: "Pixel" } : null),
+      },
+    }));
+    vi.resetModules();
+    mod = await import("./proxy");
+    peerToken = await import("./lib/peer-token");
+    access = await import("./lib/access");
+    access.__resetAccessCacheForTests();
+  });
+
+  afterEach(() => {
+    vi.doUnmock("@/lib/sandbox-client");
+  });
+
+  it("refuses a revoked PEER on any api path, including ones no route ever guarded", async () => {
+    live = false;
+    const t = await mkPeerToken();
+    for (const pathname of ["/api/files", "/api/previews", "/api/skills", "/api/agents", "/api/events"]) {
+      const res = await mod.proxy(peerReq({ pathname, cookieToken: t }));
+      expect(res.status, pathname).toBe(403);
+    }
+  });
+
+  it("refuses a revoked DEVICE on any api path", async () => {
+    live = false;
+    const t = await peerToken.signHostDeviceToken({ did: "device-1", host: TUNNEL_HOST }, PEER_SECRET);
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/api/files`, {
+      headers: { host: TUNNEL_HOST, origin: `https://${TUNNEL_HOST}`, cookie: `hooop_host_device=${t}` },
+    }));
+    expect(res.status).toBe(403);
+    // And it is never forwarded as the host to anything downstream.
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBeNull();
+  });
+
+  it("lets a live grant through untouched", async () => {
+    const t = await mkPeerToken();
+    const res = await mod.proxy(peerReq({ pathname: "/api/files", cookieToken: t }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-middleware-request-x-hooop-participant")).toBe("peer:share-1");
+  });
+
+  it("sends a revoked PAGE request to the signed-out page, not to a broken shell", async () => {
+    // Rendering would show the host's empty new-session form, since every request
+    // behind it is refused — which reads as the app being broken rather than as
+    // access having ended.
+    live = false;
+    const t = await mkPeerToken();
+    const res = await mod.proxy(peerReq({ pathname: "/", cookieToken: t }));
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/left");
+  });
+
+  it("tells a revoked device it was the DEVICE, not a share", async () => {
+    live = false;
+    const t = await peerToken.signHostDeviceToken({ did: "device-1", host: TUNNEL_HOST }, PEER_SECRET);
+    const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}/`, {
+      headers: { host: TUNNEL_HOST, cookie: `hooop_host_device=${t}` },
+    }));
+    expect(res.headers.get("location")).toContain("as=device");
+  });
+
+  it("does not redirect the signed-out page to itself", async () => {
+    // It is where the redirect points, so gating it would loop forever.
+    live = false;
+    const t = await mkPeerToken();
+    const res = await mod.proxy(peerReq({ pathname: "/left", cookieToken: t }));
+    expect(res.status).toBe(200);
+  });
+
+  it("never probes for the host at the machine", async () => {
+    // Their authority is the install cookie: nothing to revoke, so a round trip
+    // per request would be pure cost.
+    let probed = false;
+    vi.doMock("@/lib/sandbox-client", () => ({
+      client: {
+        validateShare: async () => { probed = true; return null; },
+        hostDeviceLive: async () => { probed = true; return null; },
+      },
+    }));
+    vi.resetModules();
+    const fresh = await import("./proxy");
+    const res = await fresh.proxy(reqWith({ pathname: "/api/sessions", cookie: `hooop_token=${token}` }));
+    expect(res.status).toBe(200);
+    expect(probed).toBe(false);
+  });
+});

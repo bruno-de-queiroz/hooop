@@ -19,6 +19,7 @@ import {
   type HostDeviceTokenPayload,
 } from "@/lib/peer-token";
 import { mutatingRequestLimiter } from "@/lib/rate-limit";
+import { grantIsLive, revokedReason } from "@/lib/access";
 
 const ONE_YEAR_SECONDS = 60 * 60 * 24 * 365;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -68,6 +69,52 @@ function passthrough(req: NextRequest, rid: string, participant: string, peerSes
   if (peerSession) headers.set(PEER_SESSION_HEADER, peerSession);
   if (peerCap) headers.set(PEER_CAP_HEADER, peerCap);
   const res = NextResponse.next({ request: { headers } });
+  res.headers.set("x-request-id", rid);
+  return res;
+}
+
+/**
+ * The terminal "you are signed out" page. Exempt from the revocation redirect
+ * below for the obvious reason: it is where that redirect POINTS, so gating it
+ * would be an infinite loop.
+ */
+const SIGNED_OUT_PATH = "/left";
+
+/**
+ * THE access check, in the one place that sees every request.
+ *
+ * A signed peer or device token stays cryptographically valid after the grant
+ * behind it is revoked, so the signature checks above prove issuance and nothing
+ * more. Only the sandbox knows whether a grant is still live, and this is where it
+ * is asked — once, for pages and API routes alike.
+ *
+ * It lives here rather than in the routes because it was in the routes: a helper
+ * each one had to remember to call, which two thirds of them did not, so a revoked
+ * peer kept reading files, previews, skills and agents while the guarded routes
+ * correctly refused them. A rule that can be forgotten will be. The proxy's
+ * matcher covers everything, so nothing can opt out by omission.
+ *
+ * Returns null to continue, or the response to send instead.
+ */
+async function refuseIfRevoked(
+  req: NextRequest,
+  rid: string,
+  participant: string,
+): Promise<NextResponse | null> {
+  if (await grantIsLive(participant)) return null;
+
+  const reason = revokedReason(participant);
+  if (req.nextUrl.pathname.startsWith("/api/")) {
+    return jsonError(403, reason, rid);
+  }
+  // A page gets sent somewhere that explains itself. Rendering the shell would
+  // show the host's empty new-session form (every request behind it refused),
+  // which reads as the app being broken rather than as access having ended.
+  if (req.nextUrl.pathname === SIGNED_OUT_PATH) return null;
+  const url = req.nextUrl.clone();
+  url.pathname = SIGNED_OUT_PATH;
+  url.search = participant.startsWith("host:") ? "?as=device" : "";
+  const res = NextResponse.redirect(url);
   res.headers.set("x-request-id", rid);
   return res;
 }
@@ -127,15 +174,20 @@ async function authorizePage(req: NextRequest, rid: string): Promise<NextRespons
   // as a guest is not what somebody who just enrolled their own phone asked for.
   const device = await resolveHostDevice(req);
   if (device && !isAllowedHost(host)) {
+    const participant = `host:${device.did}`;
+    const refused = await refuseIfRevoked(req, rid, participant);
+    if (refused) return refused;
     // Emphatically NOT the install cookie — the device authenticates with its own
     // revocable token, so a stolen phone costs you that device and not the
     // install. Everything else about being the host is identical.
-    return passthrough(req, rid, `host:${device.did}`);
+    return passthrough(req, rid, participant);
   }
 
   // Peer path: a verified peer cookie bound to this (tunnel) host.
   const peer = await resolvePeer(req);
   if (peer && !isAllowedHost(host)) {
+    const refusedPeer = await refuseIfRevoked(req, rid, `peer:${peer.sid}`);
+    if (refusedPeer) return refusedPeer;
     // A peer is locked to exactly one session. On the bare root:
     //  - no session selected → redirect to their bound session (don't show the
     //    host's create-session shell). The redirect carries the param, so it
@@ -234,6 +286,8 @@ async function authorizeApi(req: NextRequest, rid: string): Promise<NextResponse
   if (deviceCookie) {
     const device = await resolveHostDevice(req);
     if (device) {
+      const refused = await refuseIfRevoked(req, rid, `host:${device.did}`);
+      if (refused) return refused;
       if (!isSameOrigin(req)) {
         return jsonError(403, "cross-origin requests are not allowed", rid);
       }
@@ -259,6 +313,8 @@ async function authorizeApi(req: NextRequest, rid: string): Promise<NextResponse
   if (!peer) {
     return jsonError(401, "missing or invalid auth", rid);
   }
+  const refusedPeer = await refuseIfRevoked(req, rid, `peer:${peer.sid}`);
+  if (refusedPeer) return refusedPeer;
   if (!isSameOrigin(req)) {
     return jsonError(403, "cross-origin requests are not allowed", rid);
   }
