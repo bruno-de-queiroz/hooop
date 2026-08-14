@@ -1025,6 +1025,32 @@ add("POST", "/sessions/:id/permission", async (req, res, params) => {
   if (guard.isPeer) {
     const target = getPendingRequests(params.id).find((r) => r.requestId === body.requestId);
     const toolName = target?.toolName ?? null;
+    // CRITICAL asks are the host's alone, whatever the share says.
+    //
+    // The gate already refuses to auto-approve one in every unattended mode
+    // (approved plan, trusted peer, auto mode) and escalates it "to a dashboard
+    // prompt (host-only decision)" — but that parenthesis was a comment, not code.
+    // A full-capability peer could answer any escalated ask, including one raised
+    // by their OWN turn: drive a turn, have the model reach for `rm -rf` or a
+    // `git push`, then approve it yourself. That is not co-driving, it is the
+    // guardrail approving itself, and it made the critical set decorative for
+    // exactly the participant it exists to contain.
+    //
+    // Checked BEFORE the capability refinements below so no tool-specific carve-out
+    // can route around it, and before `decision` is even parsed so a peer learns
+    // nothing about what they are not allowed to answer.
+    //
+    // The host on an enrolled device counts as the host here — which is what makes
+    // this a workable rule rather than a wall. Before devices, "only the host may
+    // approve" meant a paired session stalled the moment the operator stepped away
+    // from their laptop; now the prompt reaches their phone.
+    if (target?.critical) {
+      return err(
+        res,
+        403,
+        "that one is the host's call — destructive commands, git, secrets and anything outside this session's folder need the host to approve, even from a full-access share",
+      );
+    }
     if (toolName === "AskUserQuestion") {
       // turn capability already confirmed by the base gate — allow.
     } else if (toolName === "ExitPlanMode") {
@@ -1043,10 +1069,18 @@ add("POST", "/sessions/:id/permission", async (req, res, params) => {
   const feedback = typeof body.feedback === "string" && body.feedback.trim()
     ? body.feedback.slice(0, 4096)
     : null;
-  // scope:"always" → grant the driving peer session-scoped auto-approve. git
-  // push is still excluded from auto-approve at request-creation time, so the
-  // host keeps that one guardrail even after granting trust.
-  const trustPeer = body.scope === "always" && body.decision === "allow";
+  // scope:"always" → grant the driving peer session-scoped auto-approve. The
+  // critical set is still excluded from auto-approve at request-creation time, so
+  // the host keeps those guardrails even after granting trust.
+  //
+  // HOST ONLY, and the flag is ignored rather than refused for a peer: their
+  // allow/deny stands, the standing grant does not. Trust is keyed on the share
+  // that DROVE the turn, not on whoever answers, so a full peer answering their
+  // own ask with scope:"always" was granting trust to themselves — which is not an
+  // escalation (they could approve each ask by hand) but it does remove the host's
+  // sight of their routine asks, one click, self-served. Deciding is shared;
+  // deciding to stop being asked is not.
+  const trustPeer = body.scope === "always" && body.decision === "allow" && !guard.isPeer;
   try {
     const result = await respondToPermission(params.id, body.requestId, body.decision, feedback, trustPeer, guard.author);
     if (!result.ok) {

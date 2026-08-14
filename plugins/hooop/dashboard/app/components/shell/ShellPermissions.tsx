@@ -202,6 +202,15 @@ function PeerWaitCard({ request }: { request: PendingPermissionRequest }) {
               </span>
             )}
           </p>
+          {/* A drive/spectate peer waits on everything, so "waiting" is the whole
+             story. A FULL peer decides the ask above this one and not this one, so
+             say which kind it is — otherwise the buttons simply vanished. */}
+          {request.critical && (
+            <p className="mt-2 text-[11px] text-ink-faint leading-relaxed">
+              This one is the host&rsquo;s call: destructive commands, git, secrets and anything
+              outside this session&rsquo;s folder always go to them, whatever your access.
+            </p>
+          )}
           <div className="mt-3 flex items-center gap-2 text-[11.5px] text-live">
             <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
             <span>Waiting for the host to approve…</span>
@@ -225,7 +234,15 @@ export function ShellPermissions() {
   // Who may decide: host or a full-access peer get Allow/Deny; drive & spectate
   // peers see a read-only "waiting for the host" bubble (the sandbox re-checks —
   // it's authoritative). Mount-gated so the server (always host) hydrates cleanly.
-  const canDecide = !mounted || canDecidePermissions();
+  const canDecideByCapability = !mounted || canDecidePermissions();
+  // ...except a CRITICAL ask, which is the host's alone whatever the share says.
+  // Per REQUEST rather than per viewer, because a full peer legitimately decides
+  // the routine ones sitting right next to it — `git push` waits for the host
+  // while the Write above it does not. The sandbox refuses a peer's decision on
+  // these regardless; this is what stops us drawing a button that would 403.
+  const viewerIsPeer = mounted && isPeerClient();
+  const canDecide = (r: PendingPermissionRequest) =>
+    canDecideByCapability && !(viewerIsPeer && r.critical);
 
   // Generic tool asks only — ExitPlanMode → plan review, AskUserQuestion → ask stack.
   const visible = pending.filter(
@@ -240,7 +257,7 @@ export function ShellPermissions() {
       className="px-5 pt-1 pb-2 shrink-0 flex flex-col gap-3 overflow-y-auto max-h-[45vh]"
     >
       {visible.map((request) =>
-        canDecide ? (
+        canDecide(request) ? (
           <PermCard
             key={request.requestId}
             request={request}

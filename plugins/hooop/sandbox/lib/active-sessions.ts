@@ -227,6 +227,26 @@ export interface PendingPermissionRequest {
   /** Share id of the driving peer (null for the host). The trust key for
    * session-scoped auto-approve. Not surfaced to clients. */
   shareId: string | null;
+  /**
+   * True when this ask is in the CRITICAL set: git, a destructive or secret
+   * Bash command, a secret path, an MCP write, a path outside the session's
+   * workdir, or publishing a preview.
+   *
+   * Recorded at creation rather than recomputed at decision time, so the
+   * question "is this dangerous?" is answered exactly once, by the code that
+   * already answers it to decide whether to escalate. Two evaluations of the
+   * same predicate against a slot whose cwd may have changed is how the gate and
+   * the decision gate come to disagree, and the disagreement that matters is the
+   * one where the gate escalates to a human and the decision path then lets the
+   * wrong human answer.
+   *
+   * What it BUYS: the ask becomes host-only to answer. The gate already refuses
+   * to auto-approve a critical call in every unattended mode (approved plan,
+   * trusted peer, auto mode) — but "escalate to a human" was not the same as
+   * "escalate to the HOST", and a full-capability peer could answer their own
+   * turn's `rm -rf`. See the permission route.
+   */
+  critical?: boolean;
   /** True for a plan review SYNTHESIZED from a plan-mode turn that ended
    * WITHOUT a blocking ExitPlanMode ask (weaker models write the plan as prose
    * and stop). No hook waits on it — approve/reject dispatch a follow-up turn
@@ -4623,6 +4643,12 @@ export function createPermissionRequest(opts: {
   const critical =
     isCriticalTool(opts.toolName, pending.input, slot?.meta.cwd ?? null) ||
     previewAction === "share";
+
+  // Stamp it on the request. Everything below decides whether to escalate; this
+  // is what makes the escalation land on the right person once it does — the
+  // permission route reads it to keep a critical ask host-only, and the dashboard
+  // reads it to show a peer a waiting state instead of buttons they must not have.
+  pending.critical = critical;
 
   // The ask tool gates those same branches, for a sharper reason than the
   // critical set: an unattended approval of an ask does not merely skip a

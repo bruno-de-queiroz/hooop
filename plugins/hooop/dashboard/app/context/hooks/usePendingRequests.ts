@@ -11,6 +11,16 @@ export interface PendingPermissionRequest {
   receivedAt: number;
   /** "host" or a peer's name — who drove the turn this ask came from. */
   author: string | null;
+  /**
+   * In the critical set: git, a destructive or secret shell command, a secret
+   * path, an MCP write, something outside the session's folder, or publishing a
+   * preview. Set by the sandbox, which is also the one enforcing it.
+   *
+   * The host answers these, and only the host — a full-access share does not
+   * carry them. So the UI shows a peer the waiting state for a critical ask even
+   * when their capability would otherwise give them buttons.
+   */
+  critical?: boolean;
 }
 
 export interface UsePendingRequestsValue {

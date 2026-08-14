@@ -227,6 +227,10 @@ Burn rows carry a **flame avatar** in the sessions rail so a self-deleting sessi
 
 Peers get one of three capability levels when admitted: **full** (can act like the host, including admitting other peers), **drive** (can act, but not admit anyone), or **spectate** (read-only). A pending join shows up as an admit/deny toast for the host or any full-capability peer.
 
+**The dangerous ones are always yours.** Whatever a share says, a guest can never approve a tool call in the **critical set**: any `git` command, a destructive shell command (`rm -rf`, `mkfs`, `dd of=`, a pipe from `curl` into a shell), anything reading secrets (`~/.ssh`, `.env`, credentials), an MCP write, a path outside the session's own folder, or publishing a preview to the public. Those wait for **you**, and a full-access peer sees the same "waiting for the host" card a spectator does. `/auto-mode` does not change it, an approved plan does not change it, and "allow all from this peer" does not change it — the critical set is excluded from every unattended approval by construction, and only the host can grant that standing trust in the first place.
+
+This is livable because of devices: the prompt reaches your phone, so a paired session no longer stalls the moment you walk away from your laptop.
+
 ### Your own second screen
 
 A share link invites **somebody else** in as a guest. To get hooop on **your own** phone, use **Your devices** in the share dialog instead: it shows a QR that is good for two minutes and can be scanned once. The device that scans it acts as **you** — same sessions, your name on your messages, no admit prompt, nothing marked as a guest joining.

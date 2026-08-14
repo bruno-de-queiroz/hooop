@@ -1176,6 +1176,45 @@ describe("auto mode (unattended approval)", () => {
     expect((await mod.awaitPermissionDecision("am-push", 200)).decision).toBe("timeout");
   });
 
+  it("STAMPS `critical` on the escalated ask, which is what makes it host-only", async () => {
+    // Load-bearing, and quietly so. The permission route reads this flag to keep a
+    // critical ask away from a full-capability peer — so if it ever stopped being
+    // set, the ask would still escalate to a prompt (visible, reassuring) while
+    // becoming answerable by the very participant the critical set exists to
+    // contain (invisible). A fail-open with no symptom, which is why it is pinned
+    // here next to the escalation itself rather than only at the route.
+    await prime("sid-crit");
+    const cases: Array<[string, string, unknown]> = [
+      ["c-git", "Bash", { command: "git push origin main" }],
+      ["c-rm", "Bash", { command: "rm -rf /workspace/build" }],
+      ["c-ssh", "Write", { file_path: "/home/agent/.ssh/authorized_keys", content: "k" }],
+      ["c-escape", "Write", { file_path: "/etc/hosts", content: "x" }],
+    ];
+    for (const [toolUseId, toolName, input] of cases) {
+      mod.createPermissionRequest({ sessionId: "sid-crit", toolName, input, toolUseId });
+    }
+    const pending = mod.getPendingRequests("sid-crit");
+    for (const [toolUseId] of cases) {
+      const row = pending.find((p) => p.toolUseId === toolUseId);
+      expect(row, toolUseId).toBeTruthy();
+      expect(row!.critical, toolUseId).toBe(true);
+    }
+  });
+
+  it("leaves `critical` falsy on a routine ask, so a peer keeps deciding those", async () => {
+    // The other half: making everything critical would take co-driving away
+    // instead of fixing the dangerous case.
+    await prime("sid-routine");
+    // INSIDE the session's own workdir: a path outside it is critical by
+    // containment, which is the rule working rather than a routine ask.
+    mod.createPermissionRequest({
+      sessionId: "sid-routine", toolName: "Write",
+      input: { file_path: join(autoCwd, "notes.md"), content: "hi" }, toolUseId: "r-write",
+    });
+    const row = mod.getPendingRequests("sid-routine").find((p) => p.toolUseId === "r-write");
+    expect(row?.critical ?? false).toBe(false);
+  });
+
   it("never auto-approves AskUserQuestion — it needs a real answer", async () => {
     await prime("sid-am3");
     mod.setSessionAutoMode("sid-am3", true, "host");
