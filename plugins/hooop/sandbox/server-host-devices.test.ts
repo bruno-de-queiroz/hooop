@@ -183,6 +183,11 @@ let srv: TestServer;
 beforeEach(async () => {
   vi.clearAllMocks();
   sessionStatus = "alive";
+  // clearAllMocks resets CALLS, not implementations, so a test that swaps this one
+  // out (the resume-swap case below) would otherwise silently answer for every test
+  // after it. Put the default back explicitly.
+  getActiveSession.mockImplementation((id: string) => ({ sessionId: id, cwd: "/tmp", status: sessionStatus }));
+  wakeSession.mockImplementation(async () => ({}));
   prevHome = process.env.HOME;
   fakeHome = mkdtempSync(join(tmpdir(), "sandbox-host-devices-home-"));
   process.env.HOME = fakeHome;
@@ -496,15 +501,33 @@ describe("where the device lands", () => {
     expect((JSON.parse(redeemed.body) as { sessionId: string }).sessionId).toBe("sess-1-resumed");
   });
 
-  it("lands nowhere in particular when the session has gone", async () => {
-    const minted = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
-      { publicHost: HOST, sessionId: "sess-1" });
-    const { code } = JSON.parse(minted.body) as { code: string };
+  it("still points at a session this sandbox is not DRIVING", async () => {
+    // Found by running the real thing: the dashboard's session list is broader than
+    // the active-session registry. A session started from the CLI, or restored from
+    // a checkpoint the registry no longer holds, shows in the rail and opens fine
+    // while having no slot here — and gating the hint on the registry handed those
+    // back null, landing the device on the "Start a session" form. Which is the
+    // complaint this field exists to fix, still reproducing for the sessions most
+    // likely to be open when somebody reaches for their phone.
+    // Unknown at mint AND at redeem, which is the live shape: the sandbox never
+    // knew this session, so mint stores the id verbatim and redeem hands it back.
     getActiveSession.mockReturnValue(undefined as never);
+    const minted = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST, sessionId: "sess-cli" });
+    const { code } = JSON.parse(minted.body) as { code: string };
 
     const redeemed = await doRequest(srv.socketPath, "POST", "/host-devices/redeem", srv.token,
       { code, publicHost: HOST }, null);
     expect(redeemed.status).toBe(200);
+    expect((JSON.parse(redeemed.body) as { sessionId: string | null }).sessionId).toBe("sess-cli");
+  });
+
+  it("lands nowhere when the host minted the code outside any session", async () => {
+    const minted = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST });
+    const { code } = JSON.parse(minted.body) as { code: string };
+    const redeemed = await doRequest(srv.socketPath, "POST", "/host-devices/redeem", srv.token,
+      { code, publicHost: HOST }, null);
     expect((JSON.parse(redeemed.body) as { sessionId: string | null }).sessionId).toBeNull();
   });
 

@@ -334,6 +334,10 @@ function touchHostDevice(req: IncomingMessage): void {
  * lazy revive on the next turn remains the fallback.
  */
 function wakeIfDormant(sessionId: string, why: string): void {
+  // No slot means nothing to wake: this sandbox is not driving that session, so
+  // there is no child to respawn and wakeSession would only throw. Those revive the
+  // way they always have, on their first turn. Deliberately narrower than the
+  // landing hint, which still points at them because the dashboard opens them fine.
   const meta = getActiveSession(sessionId);
   if (!meta || meta.status === "alive" || meta.status === "expired") return;
   void wakeSession(meta.sessionId)
@@ -2028,19 +2032,28 @@ add("POST", "/host-devices/redeem", async (req, res) => {
   const label = typeof body.label === "string" ? body.label : null;
   const result = redeemEnrollCode(body.code, publicHost, label);
   if (!result.ok) return err(res, 403, result.reason);
-  // Where the device should LAND. Re-resolved here rather than trusted from mint
-  // time: a resume during the code's two-minute life would have swapped the id,
-  // and sending the device to a stale one drops it on the session list. Null when
-  // the session has since gone — the device then lands on the dashboard, which is
-  // the honest answer.
   if (supersede && supersede !== result.device.deviceId) {
     const dropped = revokeHostDevice(supersede);
     if (dropped.ok) {
       log.info("host-devices", "superseded the browser's previous device", { supersede });
     }
   }
+  // Where the device should LAND.
+  //
+  // Re-resolved rather than trusted from mint time, because a resume inside the
+  // code's two-minute life swaps the canonical id, and sending the device to the
+  // old one drops it on the session list.
+  //
+  // Falling back to what we stored, though, NOT to null, when the registry has
+  // never heard of it. getActiveSession only knows the sessions this sandbox is
+  // DRIVING, and the dashboard's list is broader: a session started from the CLI,
+  // or restored from a checkpoint this registry no longer holds, shows in the rail
+  // and opens perfectly well while having no slot here. Gating on the registry
+  // handed those back null and landed the device on the "Start a session" form —
+  // the exact complaint this field exists to fix, still reproducing for the
+  // sessions most likely to be open when somebody reaches for their phone.
   const landOn = result.sessionId
-    ? getActiveSession(result.sessionId)?.sessionId ?? null
+    ? getActiveSession(result.sessionId)?.sessionId ?? result.sessionId
     : null;
   // Audit trail: enrolling a device is a grant of host authority, so it leaves a
   // marker in the transcript stream the same way admitting a peer does. No
