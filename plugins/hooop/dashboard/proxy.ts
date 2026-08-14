@@ -81,6 +81,32 @@ function passthrough(req: NextRequest, rid: string, participant: string, peerSes
 const SIGNED_OUT_PATH = "/left";
 
 /**
+ * Static files that belong to no participant: the favicon, the PWA icons and
+ * manifest, and the push service worker.
+ *
+ * They matter because the /join and /enroll pages are rendered BEFORE anyone has
+ * a credential, and they reference the manifest and the favicon like every other
+ * page. Once a cookieless page request started redirecting to the signed-out page
+ * (which is the right answer for a page), those two screens lost their favicon and
+ * their manifest fetch as collateral — the first thing a guest ever sees, with a
+ * broken tab icon.
+ *
+ * Exact string comparisons rather than an extension pattern or a matcher change.
+ * This is the auth gate's front door: a clever regex here is how a route added
+ * later silently skips the whole thing, and these files were already served to
+ * anyone holding the URL, so naming them changes nothing about their exposure.
+ */
+function isPublicAsset(pathname: string): boolean {
+  return (
+    pathname === "/manifest.webmanifest" ||
+    pathname === "/sw.js" ||
+    pathname === "/icon.svg" ||
+    pathname === "/icon-192.png" ||
+    pathname === "/icon-512.png"
+  );
+}
+
+/**
  * The strongest LIVE credential this request carries.
  *
  * "Strongest" is why the device is looked at first: a browser can legitimately
@@ -201,7 +227,8 @@ export async function proxy(req: NextRequest) {
     pathname === "/api/host-device/enroll" ||
     pathname.startsWith("/join/") ||
     pathname === "/join" ||
-    pathname === "/enroll"
+    pathname === "/enroll" ||
+    isPublicAsset(pathname)
   ) {
     return passthrough(req, rid, "none");
   }

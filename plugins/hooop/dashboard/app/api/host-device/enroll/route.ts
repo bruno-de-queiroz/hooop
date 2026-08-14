@@ -72,7 +72,10 @@ export async function POST(req: Request) {
         status: 429,
         headers: {
           "Content-Type": "application/json",
-          "Retry-After": String(!rate.ok ? rate.resetSec : ceiling.ok ? 60 : ceiling.resetSec),
+          // Whichever limiter actually tripped. (The final branch is unreachable —
+          // we are only here because one of them said no — but the union types
+          // only expose `resetSec` on the refused arm, so it has to be spelled.)
+          "Retry-After": String(!rate.ok ? rate.resetSec : !ceiling.ok ? ceiling.resetSec : 60),
         },
       },
     );

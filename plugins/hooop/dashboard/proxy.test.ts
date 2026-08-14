@@ -961,3 +961,31 @@ describe("proxy — the tunnel is not an app you can just open", () => {
     expect(res.headers.get("set-cookie") ?? "").toContain("hooop_token=");
   });
 });
+
+describe("proxy — public assets are nobody's", () => {
+  // The /join and /enroll pages render BEFORE anyone has a credential, and they
+  // reference the manifest and the favicon like every other page. Once cookieless
+  // page requests started redirecting (right for a page), those two screens lost
+  // their favicon and manifest as collateral — the first thing a guest sees, with a
+  // broken tab icon.
+  it("serves them on the tunnel with no credential at all", async () => {
+    for (const pathname of ["/icon.svg", "/icon-192.png", "/icon-512.png", "/manifest.webmanifest", "/sw.js"]) {
+      const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}${pathname}`, {
+        headers: { host: TUNNEL_HOST },
+      }));
+      expect(res.status, pathname).toBe(200);
+      // As nobody: an asset must never be handed a participant identity.
+      expect(res.headers.get("x-middleware-request-x-hooop-participant"), pathname).toBe("none");
+    }
+  });
+
+  it("does not let an asset-looking path smuggle a page or an api route past the gate", async () => {
+    // The reason this is a list of exact strings and not a pattern.
+    for (const pathname of ["/icon.svg/../api/sessions", "/sw.js.map", "/manifest.webmanifest/x", "/icons"]) {
+      const res = await mod.proxy(new NextRequest(`https://${TUNNEL_HOST}${pathname}`, {
+        headers: { host: TUNNEL_HOST },
+      }));
+      expect(res.status, pathname).not.toBe(200);
+    }
+  });
+});
