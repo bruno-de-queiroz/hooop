@@ -4783,6 +4783,65 @@ export function peekPermissionDecision(
   return earlyPermissionDecisions.get(requestId) ?? null;
 }
 
+/**
+ * Take a pending ask back off the board because nobody is waiting on it any more.
+ *
+ * awaitPermissionDecision's timeout deletes the WAITER and leaves the request
+ * pending, which is right for the hook gate — claude is still blocked, the hook
+ * long-polls again, and the card must stay. It is wrong for an ask the sandbox
+ * itself raised and then gave up on, like a guest's `!bash` that timed out: the
+ * guest has already been told nobody answered, while the card sits on the host's
+ * screen indefinitely. Clicking Allow on it then does nothing at all — there is no
+ * waiter left to resolve — so the host believes they authorised a destructive
+ * command and no part of the system agrees.
+ *
+ * A stale control that silently does nothing is worse than no control, because it
+ * teaches the operator that Allow is unreliable on exactly the cards where they are
+ * being careful.
+ *
+ * Emits a PermissionResponse so the dashboard drops the card the same way it does
+ * for a real decision, and so the transcript records why it went away.
+ */
+export function withdrawPermissionRequest(
+  sessionId: string,
+  requestId: string,
+  reason: string,
+): { ok: boolean } {
+  const slot = getSlot(sessionId);
+  let removed: PendingPermissionRequest | null = null;
+  if (slot) {
+    const idx = slot.pendingRequests.findIndex((r) => r.requestId === requestId);
+    if (idx >= 0) removed = slot.pendingRequests.splice(idx, 1)[0];
+  }
+  if (!removed) {
+    const list = slotlessPending.get(sessionId);
+    const idx = list?.findIndex((r) => r.requestId === requestId) ?? -1;
+    if (list && idx >= 0) removed = list.splice(idx, 1)[0];
+  }
+  if (!removed) return { ok: false };
+
+  // Any decision stashed for a waiter that no longer exists would otherwise sit in
+  // the map until its own timer, and could be handed to a LATER ask that reuses the
+  // id (claude's tool_use_id is not ours to assume unique across time).
+  earlyPermissionDecisions.delete(requestId);
+
+  try {
+    ingestEventLine(JSON.stringify({
+      ts: new Date().toISOString(),
+      hook: "PermissionResponse",
+      ctx: {
+        session_id: slot?.meta.sessionId ?? sessionId,
+        tool_name: removed.toolName,
+        request_id: requestId,
+        decision: "withdrawn",
+        reason,
+        message: reason,
+      },
+    }));
+  } catch { /* non-fatal */ }
+  return { ok: true };
+}
+
 export function awaitPermissionDecision(
   requestId: string,
   timeoutMs: number,

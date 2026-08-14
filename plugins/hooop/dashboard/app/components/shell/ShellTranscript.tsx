@@ -673,9 +673,12 @@ const BashCard = memo(function BashCard({ row }: { row: EventRow }) {
              destructive command started reaching this card by way of the host's
              approval, at which point the one surface a human reads for "who did
              that" was naming the wrong person for the commands that matter most. */}
+          {/* max-w + truncate: a peer names themselves at join, bounded at 80
+             characters, and `shrink-0` would let all 80 push the command itself off
+             the row. The command is the point of the row. */}
           <span
             className={cn(
-              "chip text-[9px] uppercase tracking-wide px-1.5 py-px shrink-0",
+              "chip text-[9px] uppercase tracking-wide px-1.5 py-px shrink-0 max-w-[8rem] truncate",
               authorIsHost(row) ? "text-ink-faint" : "text-sdk",
             )}
             title={authorIsHost(row) ? "run by the host" : `run by ${row.author}`}

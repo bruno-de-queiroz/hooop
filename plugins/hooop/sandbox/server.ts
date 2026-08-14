@@ -53,6 +53,7 @@ import {
   editPlanReviewComment,
   removePlanReviewComment,
   awaitPermissionDecision,
+  withdrawPermissionRequest,
   peekPermissionDecision,
   activeSessionsBus,
   bootActiveSessions,
@@ -858,7 +859,33 @@ add("POST", "/sessions/:id/bash", async (req, res, params) => {
       shareId: guard.shareId,
       decisionReason: `\`!bash\` shortcut from ${guard.author} — runs directly in the session, without the model`,
     });
+    // If the guest gives up first — closes the tab, navigates away — take the card
+    // back rather than leaving the host holding an approval nobody is waiting for.
+    // Same reasoning as the timeout below: a card whose Allow does nothing teaches
+    // the operator that Allow is unreliable, and this is the last place to teach
+    // them that.
+    let settled = false;
+    res.on("close", () => {
+      if (!settled) {
+        withdrawPermissionRequest(
+          meta.sessionId,
+          ask.requestId,
+          `${guard.author} stopped waiting for approval of that command`,
+        );
+      }
+    });
     const verdict = await awaitPermissionDecision(ask.requestId, BASH_SHORTCUT_APPROVAL_MS);
+    settled = true;
+    if (verdict.decision === "timeout") {
+      // Nobody answered. The request is still pending — awaitPermissionDecision's
+      // timeout only drops the waiter — so withdraw it, or the card lives on the
+      // host's screen with an Allow button that resolves nothing.
+      withdrawPermissionRequest(
+        meta.sessionId,
+        ask.requestId,
+        `nobody approved ${guard.author}'s \`${body.command.slice(0, 60)}\` in time`,
+      );
+    }
     if (verdict.decision !== "allow") {
       // Timeout reads as "nobody was there", which is a different sentence from
       // "the host said no" and the guest deserves the accurate one.

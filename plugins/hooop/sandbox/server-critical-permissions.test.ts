@@ -89,6 +89,7 @@ const respondToPermission = vi.fn(async () => ({ ok: true as const }));
 const createPermissionRequest = vi.fn((_opts: unknown) => ({ requestId: "ask-1", sessionId: "sess-1" }));
 let verdict: { decision: "allow" | "deny" | "timeout"; reason?: string | null } = { decision: "deny", reason: "nope" };
 const awaitPermissionDecision = vi.fn(async () => verdict);
+const withdrawPermissionRequest = vi.fn(() => ({ ok: true }));
 
 // ---- session registry: controllable status, so dormancy can be simulated ----
 let sessionStatus = "alive";
@@ -120,6 +121,7 @@ vi.mock("./lib/active-sessions", () => ({
   // The `!bash` escalation: raise a card, park on the decision.
   createPermissionRequest: (opts: unknown) => createPermissionRequest(opts),
   awaitPermissionDecision: (...a: unknown[]) => awaitPermissionDecision(...(a as [])),
+  withdrawPermissionRequest: (...a: unknown[]) => withdrawPermissionRequest(...(a as [])),
   peekPermissionDecision: vi.fn(() => undefined),
 }));
 vi.mock("./lib/skills", () => ({ listSkills: () => [], startSkillsWatcher: vi.fn(), stopSkillsWatcher: vi.fn(), skillsBus: new EventEmitter() }));
@@ -208,6 +210,7 @@ beforeEach(async () => {
   share.capability = "full";
   verdict = { decision: "deny", reason: "nope" };
   createPermissionRequest.mockImplementation(() => ({ requestId: "ask-1", sessionId: "sess-1" }));
+  withdrawPermissionRequest.mockClear();
   // One critical ask and one routine one, side by side in the same session — which
   // is the case that makes this per-request rather than per-viewer.
   asks = [
@@ -368,6 +371,31 @@ describe("a guest's destructive `!bash` asks the host", () => {
     const res = await bash("rm -rf /workspace", "peer:share-1");
     expect(res.status).toBe(403);
     expect(JSON.parse(res.body).error).toContain("didn't answer");
+  });
+
+  it("takes the card BACK when nobody answers in time", async () => {
+    // awaitPermissionDecision's timeout only drops the waiter, so the request stays
+    // pending. Without withdrawing it, the guest is told nobody answered while the
+    // card sits on the host's screen with an Allow button that resolves nothing —
+    // they would authorise a destructive command into the void.
+    verdict = { decision: "timeout" };
+    await bash("rm -rf /workspace", "peer:share-1");
+    expect(withdrawPermissionRequest).toHaveBeenCalledTimes(1);
+    const [sid, rid] = withdrawPermissionRequest.mock.calls[0] as unknown[];
+    expect(sid).toBe("sess-1");
+    expect(rid).toBe("ask-1");
+  });
+
+  it("leaves the card alone when the host actually decided it", async () => {
+    // respondToPermission already removed it; withdrawing again would emit a second
+    // event for one ask.
+    verdict = { decision: "deny", reason: "no" };
+    await bash("rm -rf /workspace", "peer:share-1");
+    expect(withdrawPermissionRequest).not.toHaveBeenCalled();
+
+    verdict = { decision: "allow" };
+    await bash("git --version", "peer:share-1");
+    expect(withdrawPermissionRequest).not.toHaveBeenCalled();
   });
 
   it("does not ask about a ROUTINE guest command", async () => {

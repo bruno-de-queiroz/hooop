@@ -4851,3 +4851,54 @@ describe("a steering message sent while the model is mid-turn", () => {
     expect(mod.popPendingAuthor(sessionId).author).toBe("host");
   });
 });
+
+describe("withdrawing a pending ask", () => {
+  // Local priming: the helpers of that name live inside earlier describe blocks.
+  async function prime(sid: string) {
+    await mod.startNewConversation({ cwd: "/x" });
+    const child = shared.children[shared.children.length - 1];
+    (child.stdout as any).pushLine({ type: "system", session_id: sid });
+    await flush();
+  }
+
+  // Introduced for the `!bash` escalation: awaitPermissionDecision's timeout drops
+  // the waiter and LEAVES the request pending, which is right for the hook gate
+  // (claude is still blocked, the hook polls again) and wrong for an ask the sandbox
+  // itself gave up on.
+  it("removes the card and records why", async () => {
+    await prime("sid-wd1");
+    const r = mod.createPermissionRequest({
+      sessionId: "sid-wd1", toolName: "Bash", input: { command: "rm -rf /x" }, toolUseId: "wd-1",
+    });
+    expect(mod.getPendingRequests("sid-wd1").some((p) => p.requestId === r.requestId)).toBe(true);
+
+    expect(mod.withdrawPermissionRequest("sid-wd1", r.requestId, "nobody answered")).toEqual({ ok: true });
+    expect(mod.getPendingRequests("sid-wd1").some((p) => p.requestId === r.requestId)).toBe(false);
+
+    const events = ingestEventLineMock.mock.calls.map((c) => JSON.parse(c[0] as string));
+    const withdrawn = events.find((e) => e.hook === "PermissionResponse" && e.ctx?.decision === "withdrawn");
+    expect(withdrawn).toBeTruthy();
+    expect(withdrawn.ctx.reason).toBe("nobody answered");
+  });
+
+  it("reports false for an ask that is already gone", async () => {
+    await prime("sid-wd2");
+    expect(mod.withdrawPermissionRequest("sid-wd2", "never-existed", "x")).toEqual({ ok: false });
+  });
+
+  it("clears any stashed decision, so a later ask can't inherit it", async () => {
+    // requestId is claude's tool_use_id, not ours to assume unique across time. A
+    // decision left stashed under a withdrawn id would be handed to whatever asks
+    // next under the same one.
+    await prime("sid-wd3");
+    const r = mod.createPermissionRequest({
+      sessionId: "sid-wd3", toolName: "Bash", input: { command: "rm -rf /x" }, toolUseId: "wd-3",
+    });
+    await mod.respondToPermission("sid-wd3", r.requestId, "allow");   // stashes: no waiter yet
+    mod.createPermissionRequest({
+      sessionId: "sid-wd3", toolName: "Bash", input: { command: "rm -rf /y" }, requestId: r.requestId,
+    });
+    mod.withdrawPermissionRequest("sid-wd3", r.requestId, "gave up");
+    expect((await mod.awaitPermissionDecision(r.requestId, 1000)).decision).toBe("timeout");
+  });
+});
