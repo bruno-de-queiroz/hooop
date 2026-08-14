@@ -6,7 +6,7 @@ const validateShareMock = vi.fn();
 vi.mock("@/lib/sandbox-client", () => ({
   client: {
     listEvents: (opts: unknown) => listEventsMock(opts),
-    // peerShareGuard consults this for peer requests; default to a live share.
+    // revokedGrantGuard consults this for peer requests; default to a live share.
     validateShare: (...a: unknown[]) => validateShareMock(...a),
   },
 }));

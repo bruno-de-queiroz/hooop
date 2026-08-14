@@ -85,11 +85,17 @@ export default function EnrollPage() {
         startedRef.current = false; // let them retry with a fresh code
         return;
       }
+      const { sessionId } = (await res.json().catch(() => ({}))) as { sessionId?: string | null };
       setPhase("done");
+      // Land on the session the host added this device FROM. Without it the device
+      // arrives with nothing selected, which for the host (unlike a peer, who is
+      // redirected to the one session their share binds them to) is the
+      // "Start a session" form — as if the enrollment had gone somewhere else.
+      //
       // Full reload rather than a client route: the enrollment response set the
       // device cookie, and the shell's identity is decided by middleware on a
       // real request. A soft navigation would render the shell as nobody.
-      window.location.replace("/");
+      window.location.replace(sessionId ? `/?session=${encodeURIComponent(sessionId)}` : "/");
     } catch {
       setPhase("error");
       setMessage("Network error while enrolling. Check your connection and try again.");

@@ -38,10 +38,17 @@ export function participantOf(req: Request): Participant {
 }
 
 /** The enrolled device this request came from, or null when the host is on the
- *  machine (or the caller isn't the host). UI/telemetry only. */
+ *  machine (or the caller isn't the host). */
 export function hostDeviceId(req: Request): string | null {
   const p = participantOf(req);
   return p.kind === "host" ? p.deviceId ?? null : null;
+}
+
+/** Same answer from a raw participant string, for server components that already
+ *  read the header themselves (there is no Request to hand around there). */
+export function hostDeviceIdOf(participant: string | null | undefined): string | null {
+  if (!participant || !participant.startsWith("host:")) return null;
+  return participant.slice("host:".length) || null;
 }
 
 /** True only for the local operator (install-token auth). */

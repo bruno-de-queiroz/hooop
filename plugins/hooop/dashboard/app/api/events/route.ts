@@ -2,13 +2,13 @@ import { client } from "@/lib/sandbox-client";
 import { clampInt } from "@shared/clamp";
 import { proxy, errorResponse } from "@/lib/api-helpers";
 import { peerSessionId } from "@/lib/peer-auth";
-import { peerShareGuard } from "@/lib/peer-live";
+import { revokedGrantGuard } from "@/lib/peer-live";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const revoked = await peerShareGuard(request);
+  const revoked = await revokedGrantGuard(request);
   if (revoked) return revoked;
 
   const url = new URL(request.url);

@@ -88,8 +88,24 @@ describe("ShellShareModal layout", () => {
     await settle();
 
     const right = [...bands()[1].children][1] as HTMLElement;
-    expect(right.textContent).toContain("Suggested name");
     expect(right.textContent).toContain("Capability");
+    expect(right.textContent).toContain("Expires");
+    expect(right.textContent).toContain("Create share link");
+  });
+
+  it("asks two questions, not four", async () => {
+    // No host-side name suggestion: the guest names themselves at the join screen
+    // and that name is the authoritative one, so the field only ever produced a
+    // label nobody sees.
+    render(<ShellShareModal open sessionId="sess-1" onClose={() => {}} />);
+    await settle();
+
+    expect(screen.queryByText(/suggested name/i)).toBeNull();
+    // And the two that remain share one row.
+    const capability = screen.getByText("Capability").closest("label")!;
+    const expires = screen.getByText("Expires").closest("label")!;
+    expect(capability.parentElement).toBe(expires.parentElement);
+    expect(capability.parentElement!.className).toContain("flex");
   });
 
   it("shows the start control, and no URL, while the tunnel is off", async () => {

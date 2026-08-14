@@ -1983,9 +1983,14 @@ add("POST", "/host-devices/enroll-code", async (req, res) => {
   const sessionId = boundedString(body.sessionId, 200);
   const label = typeof body.label === "string" ? body.label : null;
   const ttlMs = typeof body.ttlMs === "number" && Number.isFinite(body.ttlMs) ? body.ttlMs : null;
+  // Canonicalise before storing: `claude --resume` swaps a session's id mid-life,
+  // and the caller may be holding an alias.
+  const canonicalSessionId = sessionId
+    ? getActiveSession(sessionId)?.sessionId ?? sessionId
+    : null;
   let minted;
   try {
-    minted = createEnrollCode({ publicHost, label, ttlMs });
+    minted = createEnrollCode({ publicHost, label, ttlMs, sessionId: canonicalSessionId });
   } catch (e) {
     // The one enrollment failure worth spelling out: the caller is the
     // authenticated host, so "you are at the cap" is safe to say and is the only
@@ -2015,6 +2020,14 @@ add("POST", "/host-devices/redeem", async (req, res) => {
   const label = typeof body.label === "string" ? body.label : null;
   const result = redeemEnrollCode(body.code, publicHost, label);
   if (!result.ok) return err(res, 403, result.reason);
+  // Where the device should LAND. Re-resolved here rather than trusted from mint
+  // time: a resume during the code's two-minute life would have swapped the id,
+  // and sending the device to a stale one drops it on the session list. Null when
+  // the session has since gone — the device then lands on the dashboard, which is
+  // the honest answer.
+  const landOn = result.sessionId
+    ? getActiveSession(result.sessionId)?.sessionId ?? null
+    : null;
   // Audit trail: enrolling a device is a grant of host authority, so it leaves a
   // marker in the transcript stream the same way admitting a peer does. No
   // session id — this is install-wide, not per-session.
@@ -2030,6 +2043,7 @@ add("POST", "/host-devices/redeem", async (req, res) => {
     label: result.device.label,
     publicHost: result.device.publicHost,
     expiresAt: result.device.expiresAt,
+    sessionId: landOn,
   });
 });
 

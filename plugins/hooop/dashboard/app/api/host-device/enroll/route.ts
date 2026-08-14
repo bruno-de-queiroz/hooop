@@ -81,7 +81,10 @@ export async function POST(req: Request) {
   const host = normalizeHost(req.headers.get("host"));
   if (!host) return errorResponse(genericErr, 401);
 
-  let device: { deviceId: string; label: string; publicHost: string; expiresAt: number | null } | null;
+  let device: {
+    deviceId: string; label: string; publicHost: string;
+    expiresAt: number | null; sessionId: string | null;
+  } | null;
   try {
     device = await client.redeemHostEnrollCode(code, host, label);
   } catch {
@@ -92,7 +95,16 @@ export async function POST(req: Request) {
   const exp = device.expiresAt ?? Date.now() + DEFAULT_TTL_MS;
   const token = await signHostDeviceToken({ did: device.deviceId, host: device.publicHost, exp }, secret);
 
-  const res = NextResponse.json({ ok: true, label: device.label, expiresAt: device.expiresAt });
+  // `sessionId` is a landing hint, not part of the grant: the device is the host
+  // and may switch sessions freely afterwards. It exists because "add a device"
+  // is pressed from ONE session's dialog, and arriving on the new-session form
+  // instead of that session reads as the enrollment having gone somewhere else.
+  const res = NextResponse.json({
+    ok: true,
+    label: device.label,
+    expiresAt: device.expiresAt,
+    sessionId: device.sessionId,
+  });
   res.cookies.set({
     name: HOST_DEVICE_COOKIE,
     value: token,

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Copy, Link2, Loader2, QrCode, Trash2, X } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import type { ShareRecord } from "@/lib/sandbox-types";
-import { IconButton } from "../ui";
+import { Button, IconButton } from "../ui";
 import { Modal } from "../ui/Overlay";
 import { HostDevicesSection } from "./HostDevicesSection";
 import { cn } from "../ui/cn";
@@ -61,7 +61,6 @@ export function ShellShareModal({
 }) {
   const [tunnel, setTunnel] = useState<TunnelStatus>({ status: "stopped", url: null, error: null });
   const [startingTunnel, setStartingTunnel] = useState(false);
-  const [peerName, setPeerName] = useState("");
   const [expiryMs, setExpiryMs] = useState<number | null>(EXPIRY_OPTIONS[1].ms);
   const [capability, setCapability] = useState<Capability>("full");
   const [creating, setCreating] = useState(false);
@@ -160,7 +159,6 @@ export function ShellShareModal({
           publicBaseUrl,
           capability,
           expiresInMs: expiryMs,
-          peerName: peerName.trim() || null,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -175,7 +173,7 @@ export function ShellShareModal({
     } finally {
       setCreating(false);
     }
-  }, [sessionId, publicBaseUrl, peerMode, expiryMs, peerName, capability, refreshShares]);
+  }, [sessionId, publicBaseUrl, peerMode, expiryMs, capability, refreshShares]);
 
   const copyLink = useCallback(async () => {
     if (!created?.link) return;
@@ -313,19 +311,27 @@ export function ShellShareModal({
               </p>
             </div>
 
+            {/* Capability and expiry side by side: two short choices, one row.
+               There is deliberately no "suggested name" field — the guest names
+               themselves at the join screen and that name is the authoritative
+               one, so a host-side suggestion was a fourth control that only ever
+               produced a label nobody sees. */}
             <div className="flex gap-3">
-              <label className="flex-1">
-                <span className="section-title">Suggested name</span>
-                <input
-                  type="text"
-                  value={peerName}
-                  onChange={(e) => setPeerName(e.target.value)}
-                  placeholder="optional — guest names themselves"
-                  title="The guest picks their own name when joining; this is just a fallback."
+              <label className="flex-1 min-w-0">
+                <span className="section-title">Capability</span>
+                <select
+                  value={capability}
+                  onChange={(e) => setCapability(e.target.value as Capability)}
                   className="field w-full text-[12px] px-2.5 py-2 mt-1.5"
-                />
+                >
+                  {CAPABILITY_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
               </label>
-              <label className="flex-1">
+              <label className="flex-1 min-w-0">
                 <span className="section-title">Expires</span>
                 <select
                   value={String(expiryMs)}
@@ -340,33 +346,24 @@ export function ShellShareModal({
                 </select>
               </label>
             </div>
+            <p className="-mt-2 text-[11px] text-ink-faint">
+              {CAPABILITY_OPTIONS.find((o) => o.value === capability)?.hint}
+            </p>
 
-            <label className="block">
-              <span className="section-title">Capability</span>
-              <select
-                value={capability}
-                onChange={(e) => setCapability(e.target.value as Capability)}
-                className="field w-full text-[12px] px-2.5 py-2 mt-1.5"
-              >
-                {CAPABILITY_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-[11px] text-ink-faint">
-                {CAPABILITY_OPTIONS.find((o) => o.value === capability)?.hint}
-              </p>
-            </label>
-
-            <button
+            {/* Same control as "Add a device" in the other column. They are the two
+               halves of one idea — bring a screen in — so making one an accent
+               call-to-action and the other a quiet pill implied a hierarchy
+               between them that does not exist. */}
+            <Button
+              variant="pill"
+              size="sm"
               onClick={create}
               disabled={creating || !canCreate}
-              className="accent-btn w-full py-2.5 text-[12px] font-semibold disabled:opacity-40"
+              className="w-full text-[11px]"
             >
-              {creating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
+              {creating ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2 className="w-3 h-3" />}
               Create share link
-            </button>
+            </Button>
 
             {error && <p className="text-[11px] text-fail">{error}</p>}
 

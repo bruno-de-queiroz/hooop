@@ -1,13 +1,13 @@
 import { client } from "@/lib/sandbox-client";
 import { proxy } from "@/lib/api-helpers";
 import { peerSessionId } from "@/lib/peer-auth";
-import { peerShareGuard } from "@/lib/peer-live";
+import { revokedGrantGuard } from "@/lib/peer-live";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
-  const revoked = await peerShareGuard(req);
+  const revoked = await revokedGrantGuard(req);
   if (revoked) return revoked;
 
   // A peer is bound to one session — never expose the host's full session list.

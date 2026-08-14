@@ -304,9 +304,21 @@ export interface SandboxClient {
     code: string,
     publicHost: string,
     label?: string | null,
-  ): Promise<{ deviceId: string; label: string; publicHost: string; expiresAt: number | null } | null>;
+  ): Promise<{
+    deviceId: string;
+    label: string;
+    publicHost: string;
+    expiresAt: number | null;
+    /** The session the host minted the code from, so the device lands there
+     *  rather than on the new-session form. Null when there was none, or when it
+     *  has since gone. */
+    sessionId: string | null;
+  } | null>;
   /** Enrolled devices, for the host's revoke list. Host-only. */
   listHostDevices(participant?: string): Promise<{ devices: HostDeviceRecord[] }>;
+  /** Is one device still enrolled? Null once revoked or expired. The read-path
+   *  revocation guard's probe, and the counterpart of validateShare. */
+  hostDeviceLive(deviceId: string): Promise<{ deviceId: string; label: string } | null>;
   /** Revoke one device. Takes effect on that device's very next request. */
   revokeHostDevice(deviceId: string, participant?: string): Promise<{ ok: boolean }>;
 
@@ -750,6 +762,14 @@ export function createHttpClient(socketPath: string): SandboxClient {
       }
     },
     listHostDevices: (participant) => request("GET", "/host-devices", undefined, participantOpts(participant)),
+    hostDeviceLive: async (deviceId) => {
+      try {
+        return await request("GET", `/host-devices/${encodeURIComponent(deviceId)}`);
+      } catch (e: any) {
+        if (e?.status === 404) return null;
+        throw e;
+      }
+    },
     revokeHostDevice: (deviceId, participant) =>
       request("POST", `/host-devices/${encodeURIComponent(deviceId)}/revoke`, undefined, participantOpts(participant)),
 

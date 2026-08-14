@@ -50,6 +50,7 @@ const DEVICE = {
   label: "Pixel",
   publicHost: TUNNEL_HOST,
   expiresAt: Date.now() + 60_000,
+  sessionId: "sess-1",
 };
 
 describe("POST /api/host-device/enroll", () => {
@@ -78,6 +79,20 @@ describe("POST /api/host-device/enroll", () => {
     const res = await mod.POST(enrollReq({ code: "ABCDEFGH" }));
     const value = /hooop_host_device=([^;]+)/.exec(res.headers.get("set-cookie") ?? "")?.[1] ?? "";
     expect(await verifyPeerToken(decodeURIComponent(value), PEER_SECRET)).toBeNull();
+  });
+
+  it("tells the device which session to land on", async () => {
+    // The host pressed "add a device" from one session's dialog. Landing on the
+    // new-session form instead reads as the enrollment having gone elsewhere.
+    redeemMock.mockResolvedValueOnce(DEVICE);
+    const res = await mod.POST(enrollReq({ code: "ABCDEFGH" }));
+    expect((await res.json()) as { sessionId: string }).toMatchObject({ sessionId: "sess-1" });
+  });
+
+  it("passes no session when there is none to land on", async () => {
+    redeemMock.mockResolvedValueOnce({ ...DEVICE, sessionId: null });
+    const res = await mod.POST(enrollReq({ code: "ABCDEFGH" }));
+    expect((await res.json()) as { sessionId: string | null }).toMatchObject({ sessionId: null });
   });
 
   it("binds the device to the hostname the request arrived on", async () => {

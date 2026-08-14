@@ -195,6 +195,16 @@ interface EnrollCode {
   label: string | null;
   ttlMs: number;
   createdAt: number;
+  /**
+   * The session the host was looking at when they minted this, carried so the
+   * device can LAND there instead of on the new-session form.
+   *
+   * Not part of the grant: a device is install-wide and can switch sessions
+   * freely afterwards. Purely "which session did you mean", which is otherwise
+   * lost — a peer gets redirected to the one session their share binds them to,
+   * and a device, having no such binding, arrived nowhere in particular.
+   */
+  sessionId: string | null;
 }
 
 const codes = new Map<string, EnrollCode>();
@@ -229,6 +239,8 @@ export function createEnrollCode(opts: {
   publicHost: string;
   label?: string | null;
   ttlMs?: number | null;
+  /** Where the device should land. Caller resolves it to a canonical id. */
+  sessionId?: string | null;
 }): { code: string; expiresAt: number; deviceTtlMs: number } {
   bootHostDevices();
   sweepCodes();
@@ -260,6 +272,7 @@ export function createEnrollCode(opts: {
     label: opts.label?.trim()?.slice(0, 60) || null,
     ttlMs,
     createdAt: now,
+    sessionId: opts.sessionId?.trim() || null,
   });
   return { code, expiresAt: now + CODE_TTL_MS, deviceTtlMs: ttlMs };
 }
@@ -277,7 +290,7 @@ export function redeemEnrollCode(
   rawCode: string,
   publicHost: string,
   label?: string | null,
-): { ok: true; device: HostDeviceRecord } | { ok: false; reason: string } {
+): { ok: true; device: HostDeviceRecord; sessionId: string | null } | { ok: false; reason: string } {
   bootHostDevices();
   sweepCodes();
   const code = typeof rawCode === "string" ? rawCode.trim().toUpperCase() : "";
@@ -317,7 +330,7 @@ export function redeemEnrollCode(
   devices.set(device.deviceId, device);
   persist();
   log.info("host-devices", "device enrolled", { deviceId: device.deviceId, label: device.label });
-  return { ok: true, device };
+  return { ok: true, device, sessionId: entry.sessionId };
 }
 
 function constantTimeEquals(a: string, b: string): boolean {

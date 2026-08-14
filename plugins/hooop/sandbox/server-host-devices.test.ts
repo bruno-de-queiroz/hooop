@@ -198,9 +198,9 @@ afterEach(async () => {
 });
 
 /** Walk the real ceremony: host mints a code, the device redeems it. */
-async function enrollDevice(label = "Pixel"): Promise<string> {
+async function enrollFully(opts: { label?: string; sessionId?: string } = {}) {
   const minted = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
-    { publicHost: HOST, label });
+    { publicHost: HOST, label: opts.label ?? "Pixel", sessionId: opts.sessionId ?? null });
   expect(minted.status).toBe(200);
   const { code } = JSON.parse(minted.body) as { code: string };
   // No participant header at all: the phone holds nothing yet, which is the whole
@@ -208,7 +208,11 @@ async function enrollDevice(label = "Pixel"): Promise<string> {
   const redeemed = await doRequest(srv.socketPath, "POST", "/host-devices/redeem", srv.token,
     { code, publicHost: HOST }, null);
   expect(redeemed.status).toBe(200);
-  return (JSON.parse(redeemed.body) as { deviceId: string }).deviceId;
+  return JSON.parse(redeemed.body) as { deviceId: string; sessionId: string | null };
+}
+
+async function enrollDevice(label = "Pixel"): Promise<string> {
+  return (await enrollFully({ label })).deviceId;
 }
 
 describe("host device enrollment routes", () => {
@@ -466,5 +470,46 @@ describe("waking a dormant session", () => {
     const res = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
       { publicHost: HOST, sessionId: "sess-1" });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("where the device lands", () => {
+  it("comes back with the session the code was minted from", async () => {
+    // A peer is redirected to the one session their share binds them to. A device
+    // has no such binding, so without this it arrived with nothing selected — the
+    // "Start a session" form, as if the enrollment had gone somewhere else.
+    const { sessionId } = await enrollFully({ sessionId: "sess-1" });
+    expect(sessionId).toBe("sess-1");
+  });
+
+  it("follows a resume that swapped the id mid-enrollment", async () => {
+    // The code lives for two minutes; `claude --resume` can rename the session
+    // inside that window, and sending the device to the old id would drop it on
+    // the session list.
+    const minted = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST, sessionId: "sess-1" });
+    const { code } = JSON.parse(minted.body) as { code: string };
+    getActiveSession.mockImplementation(() => ({ sessionId: "sess-1-resumed", cwd: "/tmp", status: sessionStatus }));
+
+    const redeemed = await doRequest(srv.socketPath, "POST", "/host-devices/redeem", srv.token,
+      { code, publicHost: HOST }, null);
+    expect((JSON.parse(redeemed.body) as { sessionId: string }).sessionId).toBe("sess-1-resumed");
+  });
+
+  it("lands nowhere in particular when the session has gone", async () => {
+    const minted = await doRequest(srv.socketPath, "POST", "/host-devices/enroll-code", srv.token,
+      { publicHost: HOST, sessionId: "sess-1" });
+    const { code } = JSON.parse(minted.body) as { code: string };
+    getActiveSession.mockReturnValue(undefined as never);
+
+    const redeemed = await doRequest(srv.socketPath, "POST", "/host-devices/redeem", srv.token,
+      { code, publicHost: HOST }, null);
+    expect(redeemed.status).toBe(200);
+    expect((JSON.parse(redeemed.body) as { sessionId: string | null }).sessionId).toBeNull();
+  });
+
+  it("is null when the host minted the code outside any session", async () => {
+    const { sessionId } = await enrollFully({});
+    expect(sessionId).toBeNull();
   });
 });
