@@ -122,8 +122,14 @@ function scratchIfSafe(scratch: string): string | null {
   try {
     planted = !lstatSync(scratch).isDirectory();
   } catch {
-    // Nothing there (or an unreadable parent) — the not-yet-created case.
-    return within(scratch, SCRATCH_ROOT) ? scratch : null;
+    // Nothing there (or an unreadable parent) — the not-yet-created case, i.e. the
+    // first write into a fresh scratch dir. Resolve it the same way the target gets
+    // resolved: comparing an UNresolved scratch against a canonical target is how
+    // you get a wrong answer on a host where /tmp is itself a symlink (macOS
+    // /private/tmp), and it also quietly re-opens the parent-symlink case this
+    // function exists to close.
+    const real = canonicalizeDeepest(scratch);
+    return real !== null && within(real, SCRATCH_ROOT) ? real : null;
   }
   if (planted) return null;
   const real = canonicalize(scratch);

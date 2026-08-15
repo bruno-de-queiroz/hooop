@@ -296,7 +296,18 @@ export function isCriticalTool(
 
   // (3) Containment. Escaping the session workdir always warrants a prompt,
   // whatever the tool is.
-  if (cwd) {
+  if (paths.length > 0) {
+    // No cwd is NOT the same as nothing to worry about, and this used to skip the
+    // whole check and fall through to `return false`. A slot lookup can miss — the
+    // ~200ms window where `claude --resume` mints a new session_id and the registry
+    // is still keyed on the old one, or an ask from a child whose slot is already
+    // gone — and on a miss the callers pass cwd: null. The read fast-lane then
+    // silently allowed ANY path with no card at all ("only an escape escalates",
+    // except nothing can escape a workdir that isn't there): another session's
+    // transcript, another session's scratch, /etc. The secret-path list above was
+    // the only thing still standing. The MCP branch below has always failed closed
+    // on a missing cwd; native tools now do the same.
+    if (!cwd) return true;
     for (const target of paths) {
       if (!isPathWithinCwd(cwd, target, scratch)) return true;
     }

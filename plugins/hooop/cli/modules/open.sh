@@ -155,10 +155,16 @@ function _launch() {
       settings_overlay=(-v "${tmp_settings}:/home/agent/.claude/settings.json:ro")
     else
       rm -f "$tmp_settings"; tmp_settings=""
-      _error "could not rewrite settings.json — dashboard hooks may error inside the sandbox."
+      _die "could not rewrite settings.json — refusing to launch with the dashboard hooks registered."
     fi
   else
-    _error "jq not found on host — cannot strip dashboard hooks; they will error inside the sandbox."
+    # Fatal, not a warning. `open` is a plain claude session that uses claude
+    # code's OWN permission modes, so none of hooop's hooks may be registered in
+    # it — they expect a sandbox HTTP socket that does not exist here. Continuing
+    # anyway produced a session where the permission gate was unreachable and
+    # every single tool call was denied, after printing one line the user had
+    # already scrolled past. jq is an install prerequisite; say so and stop.
+    _die "jq not found on host — needed to strip the dashboard hooks from this sandbox. Install jq and retry."
   fi
 
   # --yolo -> claude's --dangerously-skip-permissions.

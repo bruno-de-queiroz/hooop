@@ -562,9 +562,14 @@ rm -f "$HOME_DIR/.claude/hooop/hook.token" 2>/dev/null || true
 # this") are meaningless when the model is the only uid in the container.
 #
 # emit-event.sh / permission-gate.sh are stripped from the settings.json overlay
-# on that path (cli/modules/open.sh) precisely because they need these sockets;
-# if the host had no jq to strip them they still fail soft — emit-event.sh falls
-# back to appending events.jsonl, and the gate is a no-op without a socket.
+# on that path (cli/modules/open.sh) precisely because they need these sockets.
+# emit-event.sh fails soft without one (it falls back to appending events.jsonl).
+# The gate does NOT: `[ -S "$SANDBOX_SOCKET" ] || emit_deny no-dashboard` denies
+# every tool call, by design ("never pass-through", see permission-gate.sh) — so a
+# host with no jq to strip it got a claude session that could not use a single
+# tool. `open` therefore refuses to launch without jq rather than stripping
+# best-effort; `open` is a plain claude session governed by claude code's own
+# permission modes, and none of hooop's hooks belong in it.
 if [ "$OPEN_MODE" = 0 ]; then
 
   # Named volume for the shared UDS + token file. Docker creates it as root:root

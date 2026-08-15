@@ -116,8 +116,24 @@ describe("isCriticalTool", () => {
     expect(isCriticalTool("NotebookEdit", { notebook_path: "~/.aws/config.ipynb" })).toBe(true);
   });
   it("treats ordinary writes and other tools as routine", () => {
-    expect(isCriticalTool("Write", { file_path: "src/index.ts" })).toBe(false);
-    expect(isCriticalTool("Edit", { file_path: "README.md" })).toBe(false);
+    // A cwd is required to call a path routine — see the next test. Without one
+    // there is nothing to be inside of.
+    const cwd = process.cwd();
+    expect(isCriticalTool("Write", { file_path: "src/index.ts" }, cwd)).toBe(false);
+    expect(isCriticalTool("Edit", { file_path: "README.md" }, cwd)).toBe(false);
+    expect(isCriticalTool("mcp__foo__bar", { anything: true })).toBe(false);
+  });
+
+  it("escalates a path when there is no cwd to contain it against", () => {
+    // These two asserted `false` for years, which quietly made "we don't know where
+    // this session lives" mean "fine". Callers pass cwd: null on a slot-lookup miss
+    // (the ~200ms `claude --resume` id-swap window), and the read fast-lane turned
+    // that into a silent allow for any path outside the secret list — including
+    // another session's transcript and another session's scratch.
+    expect(isCriticalTool("Write", { file_path: "src/index.ts" })).toBe(true);
+    expect(isCriticalTool("Read", { file_path: "/home/agent/.claude/projects/other.jsonl" })).toBe(true);
+    expect(isCriticalTool("Read", { file_path: "/tmp/hooop-session/another-session/notes.txt" })).toBe(true);
+    // Still nothing to judge when the tool carries no path at all.
     expect(isCriticalTool("mcp__foo__bar", { anything: true })).toBe(false);
   });
 
@@ -204,10 +220,20 @@ describe("isCriticalTool", () => {
       expect(isCriticalTool("Glob", { pattern: "src/**/*.ts" }, cwd)).toBe(false);
     });
 
-    it("skips containment entirely when no cwd is known (slot-less skill runs)", () => {
-      // Failing closed here would make every standalone skill run prompt; such
-      // a run has no session workdir to be outside of in the first place.
-      expect(isCriticalTool("Write", { file_path: "/anywhere/at/all.txt" }, null)).toBe(false);
+    it("escalates instead of skipping containment when no cwd is known", () => {
+      // This asserted `false`, to keep standalone skill runs from prompting. That
+      // premise expired: skill runs own a slot like any other session (27054af), and
+      // `hooop open` strips the hooop hooks entirely, so neither reaches this gate.
+      // What does is an ask whose slot vanished mid-flight — an ended, purged or
+      // remapped session. Those got a silent allow through the read fast-lane, which
+      // stamps "auto-allowed (read, within workdir)" on a read with no workdir at
+      // all, for any path outside the secret list.
+      expect(isCriticalTool("Write", { file_path: "/anywhere/at/all.txt" }, null)).toBe(true);
+      expect(isCriticalTool("Read", { file_path: "/anywhere/at/all.txt" }, null)).toBe(true);
+      // The cost, stated plainly: such an ask escalates, and if no dashboard row is
+      // left to show the card on, the hook denies it after its 120s timeout instead
+      // of reading the file. For a session that already ended, that is the answer we
+      // want; the alternative is an unrecorded read.
     });
   });
 });
