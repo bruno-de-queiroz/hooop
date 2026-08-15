@@ -1,5 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmdirSync, symlinkSync, mkdirSync, rmSync, statSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmdirSync,
+  symlinkSync,
+  mkdirSync,
+  rmSync,
+  statSync,
+  existsSync,
+  chmodSync,
+  unlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -295,6 +305,30 @@ describe("a scratch dir someone else planted", () => {
 
     expect(ensureSessionScratch(id)).toBeNull();
     rmSync(elsewhere, { recursive: true, force: true });
+  });
+
+  it("will not chmod through a symlink planted at the scratch PARENT", () => {
+    // mkdir -p succeeds on a symlink-to-directory and chmod follows it, so without
+    // the lstat this hands the attacker a chmod of their chosen target — and this
+    // process owns ~/.claude and /var/run/hooop (0750, the socket's only real lock).
+    const parent = "/tmp/hooop-session";
+    try {
+      rmdirSync(parent); // only succeeds when empty, which is the state tests leave
+    } catch {
+      // A real install owns it (root/hooopd, or live sessions inside). Planting a
+      // symlink over that would be worse than skipping the assertion.
+      return;
+    }
+    const victim = mkdtempSync(join(tmpdir(), "hooop-victim-"));
+    chmodSync(victim, 0o700);
+    symlinkSync(victim, parent);
+    try {
+      expect(ensureSessionScratch(freshId("plink"))).toBeNull();
+      expect(statSync(victim).mode & 0o7777).toBe(0o700); // NOT widened to 1777
+    } finally {
+      unlinkSync(parent);
+      rmSync(victim, { recursive: true, force: true });
+    }
   });
 
   it("leaves the leaf to the session and makes the parent writable by it", () => {

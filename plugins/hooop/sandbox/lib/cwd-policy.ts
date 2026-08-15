@@ -74,9 +74,19 @@ function canonicalizeDeepest(abs: string): string | null {
  * output — but `/tmp` is outside the workdir, so every read escalated to a human.
  *
  * Why it is not just `/tmp`: every session in an install shares one sandbox
- * container, so a blanket `/tmp` allowance would let one session read another's
- * scratch with no prompt. Containment between sessions is the thing keeping them
- * apart. Per-session, it stays contained by construction.
+ * container, so a blanket `/tmp` allowance would let one session's Read/Write/Edit
+ * reach another's scratch with no prompt at all. Per-session, that ask escalates
+ * like any other path outside the workdir (verified live: a symlinked scratch dir
+ * produced a card under auto mode).
+ *
+ * What this does NOT isolate, so nobody reads more into it than it earns: Bash.
+ * Landlock hands a confined session the whole of `$TMPDIR` read-write (see
+ * landlockSpawnEnv) and a Bash command is judged by its text, not by path
+ * containment, so `cat /tmp/hooop-session/<other-id>/x` is not stopped here. That
+ * predates this directory — sessions have always shared /tmp — but a predictable
+ * per-session path makes it aimable, and every session runs as the same `agent`
+ * uid, so no mode can help either. Real isolation between sessions needs separate
+ * uids or per-session tmpfs, not a policy check.
  *
  * The path is blessed here; ensureSessionScratch() prepares the area around it,
  * scratchIfSafe() refuses to honour a poisoned one, and the session itself creates
@@ -162,6 +172,22 @@ export function ensureSessionScratch(sessionId: string): string | null {
   if (!dir) return null;
   const parent = dirname(dir);
   try {
+    // lstat the parent BEFORE touching it. `mkdir -p` succeeds silently on a
+    // symlink-to-directory and `chmod` follows symlinks, so a link planted at this
+    // name turns the two calls below into "widen the attacker's chosen directory to
+    // 1777" — and this process owns both ~/.claude and /var/run/hooop, whose whole
+    // security property is its 0750 mode. Verified rather than assumed: chmod
+    // through a link moved a 0700 target to 1777 and left the link a link.
+    let plantedParent = false;
+    try {
+      plantedParent = !lstatSync(parent).isDirectory();
+    } catch {
+      /* absent — the normal first-spawn case, mkdir below creates it */
+    }
+    if (plantedParent) {
+      log.warn("cwd-policy", "something other than a directory holds the scratch parent; no scratch allowance", { parent });
+      return null;
+    }
     mkdirSync(parent, { recursive: true });
     // mkdir's mode argument is masked by umask, so set the bits we mean directly.
     chmodSync(parent, 0o1777);
