@@ -22,7 +22,7 @@ import { STATE_DIR, CLAUDE_SESSIONS_DIR, SESSIONS_ROOT, sessionWorkdir, HOOK_SOC
 import { ingestEventLine } from "./ingestor";
 import { deleteEventsForSessions, listEventSessionIds } from "./db";
 import { discoverInstalledPluginDirs } from "./plugin-paths";
-import { isCwdAllowed } from "./cwd-policy";
+import { isCwdAllowed, sessionScratchDir } from "./cwd-policy";
 import { bashConfinementEnv } from "./landlock-policy";
 import { isCriticalBash, isCriticalTool } from "./peer-policy";
 import {
@@ -1527,6 +1527,32 @@ const PLAN_SYSTEM_PROMPT =
   "message does NOT submit it: a plan is captured for human review only when you " +
   "call `submit_plan`. Investigate first with Read/Grep/Glob, then submit.";
 
+/**
+ * Standing steer about where scratch goes.
+ *
+ * Measured on a real auto-mode session: 30 of 72 permission cards were the agent
+ * writing screenshots and helper scripts to `/tmp/…` and then reading them back.
+ * Every read escalated to a human, because `/tmp` is outside the session workdir —
+ * which is true, and completely beside the point: it was the agent's own output.
+ *
+ * The session workdir has always been writable without a prompt. The model used
+ * `/tmp` out of habit, so this is a habit fix rather than a policy one, and it costs
+ * nothing in containment: both directories named here are inside the boundary
+ * already (the workdir by definition, the scratch dir by sessionScratchDir).
+ *
+ * `{{SCRATCH}}` is substituted per session, because the blessed path is
+ * per-session — a shared `/tmp` allowance would let one session read another's
+ * scratch, and every session in an install shares one container.
+ */
+const SCRATCH_SYSTEM_PROMPT =
+  "Keep temporary files inside this session's own directories: your working " +
+  "directory for anything related to the task, or {{SCRATCH}} for throwaway " +
+  "scratch (screenshots, one-off scripts, intermediate output). Both are writable " +
+  "without asking. Writing or reading elsewhere — /tmp directly, another " +
+  "session's folder, anything outside your working directory — interrupts the " +
+  "human for approval every time, so prefer these two even for files you intend " +
+  "to delete straight after.";
+
 // The interactive tools headless mode lacks come from the bundled hooop MCP
 // server (see plugins/hooop/.mcp.json + mcp/tools-server.mjs). Claude namespaces
 // plugin MCP tools as `mcp__plugin_hooop_tools__<tool>`; we match tolerantly
@@ -2809,6 +2835,15 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
     args.push("--session-id", sessionId);
   }
 
+  // Where scratch belongs — appended here rather than with the plan prompt above,
+  // because the path it names is per-session and `sessionId` is only settled now.
+  // Skipped entirely if the id doesn't validate: steering the agent at a directory
+  // that is NOT inside its boundary would be worse than saying nothing.
+  const scratchDir = sessionScratchDir(sessionId);
+  if (scratchDir) {
+    args.push("--append-system-prompt", SCRATCH_SYSTEM_PROMPT.replace("{{SCRATCH}}", scratchDir));
+  }
+
   // Auto-compaction is always on. `ctxWindow` is the model-bound window sized
   // from the effective model (explicit or resolved default); it's null only
   // when no model is configured anywhere. The meter uses only that (never a
@@ -3011,7 +3046,7 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
             // becomes a card as-is — so criticality has to be stamped here too, or
             // the permission route sees an unflagged ask and lets a full peer
             // answer their own turn's destructive command.
-            markCritical(pending, slot.meta.cwd);
+            markCritical(pending, slot.meta.cwd, slot.meta.sessionId);
             slot.pendingRequests.push(pending);
             const eventLine = JSON.stringify({
               ts: new Date().toISOString(),
@@ -4385,9 +4420,9 @@ async function runPageTool(
  * full-capability peer the flag exists to keep away from it. A fail-open with no
  * symptom: the card still appears, it just accepts the wrong person's answer.
  */
-function markCritical(pending: PendingPermissionRequest, cwd: string | null): boolean {
+function markCritical(pending: PendingPermissionRequest, cwd: string | null, sessionId?: string | null): boolean {
   pending.critical =
-    isCriticalTool(pending.toolName, pending.input, cwd) ||
+    isCriticalTool(pending.toolName, pending.input, cwd, sessionId ? sessionScratchDir(sessionId) : null) ||
     // Publishing agent-written code to a public URL is a human decision every
     // time, in every mode — and the host's, not a guest's.
     previewToolAction(pending.toolName) === "share";
@@ -4526,7 +4561,7 @@ export function createPermissionRequest(opts: {
     // credential is the first half of an exfiltration chain, and plan mode is
     // otherwise a wide-open read surface. Contained reads pass; anything
     // reaching outside the workdir still needs a human.
-    if (isCriticalTool(opts.toolName, pending.input, slot.meta.cwd)) {
+    if (isCriticalTool(opts.toolName, pending.input, slot.meta.cwd, sessionScratchDir(slot.meta.sessionId))) {
       return decideNow(
         "deny",
         "Plan mode: that path is outside this session's working directory. Investigate within the workdir, then submit your plan with the submit_plan tool.",
@@ -4609,7 +4644,7 @@ export function createPermissionRequest(opts: {
   // overwhelmingly common case (a read inside the workdir); only an escape
   // escalates.
   if (READ_FAST_LANE_TOOLS.has(opts.toolName)) {
-    if (!isCriticalTool(opts.toolName, pending.input, slot?.meta.cwd ?? null)) {
+    if (!isCriticalTool(opts.toolName, pending.input, slot?.meta.cwd ?? null, slot ? sessionScratchDir(slot.meta.sessionId) : null)) {
       return decideNow("allow", "auto-allowed (read, within workdir)");
     }
     // Outside the workdir / a secret path → fall through to a dashboard prompt.
@@ -4681,7 +4716,7 @@ export function createPermissionRequest(opts: {
   // it does — the permission route reads it to keep a critical ask host-only, and
   // the dashboard reads it to show a peer a waiting state instead of buttons they
   // must not have.
-  const critical = markCritical(pending, slot?.meta.cwd ?? null);
+  const critical = markCritical(pending, slot?.meta.cwd ?? null, slot?.meta.sessionId ?? null);
 
   // The ask tool gates those same branches, for a sharper reason than the
   // critical set: an unattended approval of an ask does not merely skip a

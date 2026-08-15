@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isGitPush, isGitCommand, peerBashAllowed, isCriticalBash, isCriticalTool } from "./peer-policy";
+import { isGitPush, isGitCommand, peerBashAllowed, isCriticalBash, isCriticalTool, setMcpLookupForTests } from "./peer-policy";
+import { sessionScratchDir } from "./cwd-policy";
 
 describe("isGitPush", () => {
   it("catches git push in common forms", () => {
@@ -208,5 +209,117 @@ describe("isCriticalTool", () => {
       // a run has no session workdir to be outside of in the first place.
       expect(isCriticalTool("Write", { file_path: "/anywhere/at/all.txt" }, null)).toBe(false);
     });
+  });
+});
+
+describe("isCriticalTool — MCP writes decided by transport, not by name", () => {
+  // The rule's own comment always described a FALLBACK ("a heuristic on the action
+  // segment", "with no path argument we recognise"). The code tested the verb
+  // against `<server>__<action>` and returned true regardless of any path, so a
+  // Serena `replace_content` on a file inside the workdir outranked a native `Edit`
+  // on the same file. Harmless while a false positive cost one extra card; once a
+  // critical ask became host-only — with trust and auto mode both excluding the
+  // critical set — it meant a guest co-driving a Serena session pinged the host on
+  // every edit, with no way out.
+  let cwd: string;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "mcp-policy-"));
+    setMcpLookupForTests(() => [
+      { name: "serena", type: "stdio" },                                  // in-container
+      { name: "mcp-search", type: "stdio", plugin: "claude-mem" },        // in-container, plugin
+      { name: "Gmail", type: "http" },                                    // acts on an account
+    ]);
+  });
+
+  afterEach(() => {
+    setMcpLookupForTests(null);
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("treats a contained write by an in-container server as routine, like native Edit", () => {
+    const inside = join(cwd, "src.ts");
+    expect(isCriticalTool("Edit", { file_path: inside }, cwd)).toBe(false);
+    expect(isCriticalTool("mcp__serena__replace_content", { relative_path: inside }, cwd)).toBe(false);
+    expect(isCriticalTool("mcp__serena__insert_after_symbol", { relative_path: "src.ts" }, cwd)).toBe(false);
+  });
+
+  it("still escalates when the path escapes the workdir", () => {
+    expect(isCriticalTool("mcp__serena__replace_content", { relative_path: "/etc/hosts" }, cwd)).toBe(true);
+  });
+
+  it("still escalates a mutation with NO path to check — the original case", () => {
+    // browser_evaluate, write_memory: nothing to contain, so the name is all we have.
+    expect(isCriticalTool("mcp__serena__write_memory", { content: "x" }, cwd)).toBe(true);
+    expect(isCriticalTool("mcp__playwright__browser_evaluate", { function: "() => 1" }, cwd)).toBe(true);
+  });
+
+  it("still escalates when there is no cwd to contain against", () => {
+    expect(isCriticalTool("mcp__serena__replace_content", { relative_path: "src.ts" }, null)).toBe(true);
+  });
+
+  it("ALWAYS escalates a server that acts outside this container", () => {
+    // A path argument to a remote server is a claim about somebody else's storage,
+    // not a boundary we can check.
+    expect(isCriticalTool("mcp__Gmail__send_message", { path: join(cwd, "draft.txt") }, cwd)).toBe(true);
+  });
+
+  it("escalates a server it cannot place, rather than assuming local", () => {
+    // Fail closed: an unreadable config or an unmappable name keeps the old, stricter
+    // behaviour instead of quietly relaxing.
+    expect(isCriticalTool("mcp__unknown-thing__write_file", { path: join(cwd, "a") }, cwd)).toBe(true);
+  });
+
+  it("resolves a plugin server under its namespaced tool name", () => {
+    expect(
+      isCriticalTool("mcp__plugin_claude-mem_mcp-search__build_corpus", { path: join(cwd, "c") }, cwd),
+    ).toBe(false);
+  });
+
+  it("matches the verb on the ACTION, never on the server name", () => {
+    // Against `<server>__<action>` a server called `gdrive-writer` or `run-tools`
+    // made every one of its tools critical, reads included.
+    // No path in either input, so containment cannot be what decides it and the
+    // verb match is isolated: before, "run" in the SERVER name made both critical.
+    setMcpLookupForTests(() => [{ name: "run-tools", type: "stdio" }]);
+    expect(isCriticalTool("mcp__run-tools__list_items", { query: "x" }, cwd)).toBe(false);
+    expect(isCriticalTool("mcp__run-tools__delete_item", { id: "x" }, cwd)).toBe(true);
+  });
+
+  it("a secret path outranks everything", () => {
+    expect(isCriticalTool("mcp__serena__replace_content", { relative_path: "~/.ssh/authorized_keys" }, cwd)).toBe(true);
+  });
+});
+
+describe("isCriticalTool — the session's own scratch counts as inside", () => {
+  // Measured: 30 of 72 cards in one auto-mode session were the agent writing
+  // screenshots to /tmp and reading them back. Its own output, escalating to a human
+  // every time. Per-session rather than a blanket /tmp, because every session in an
+  // install shares one container and containment is what keeps them apart.
+  const cwd = "/workspace/session-a";
+  const scratch = sessionScratchDir("9e3bf607-1496-40bf-882f-12766d4e8a5c")!;
+
+  it("reads and writes inside it are routine", () => {
+    expect(isCriticalTool("Read", { file_path: `${scratch}/shot.png` }, cwd, scratch)).toBe(false);
+    expect(isCriticalTool("Write", { file_path: `${scratch}/run.mjs` }, cwd, scratch)).toBe(false);
+  });
+
+  it("bare /tmp is still outside — one session must not read another's scratch", () => {
+    expect(isCriticalTool("Read", { file_path: "/tmp/mobilecheck/shot.png" }, cwd, scratch)).toBe(true);
+    const other = sessionScratchDir("00000000-1111-2222-3333-444444444444")!;
+    expect(isCriticalTool("Read", { file_path: `${other}/shot.png` }, cwd, scratch)).toBe(true);
+  });
+
+  it("is not granted when the caller passes none", () => {
+    expect(isCriticalTool("Read", { file_path: `${scratch}/shot.png` }, cwd)).toBe(true);
+  });
+
+  it("refuses to build a path from an id that isn't plainly one", () => {
+    // The id becomes a filesystem path that grants relaxed access, so a crafted one
+    // must not widen the boundary.
+    expect(sessionScratchDir("../../etc")).toBeNull();
+    expect(sessionScratchDir("/absolute")).toBeNull();
+    expect(sessionScratchDir("a/b")).toBeNull();
+    expect(sessionScratchDir("short")).toBeNull();
   });
 });

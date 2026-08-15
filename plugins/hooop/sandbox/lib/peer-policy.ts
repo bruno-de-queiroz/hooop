@@ -16,6 +16,63 @@
  */
 
 import { isPathWithinCwd } from "./cwd-policy";
+import { listMcps } from "./mcps";
+
+/**
+ * Which MCP servers run INSIDE the sandbox container (stdio) as opposed to
+ * reaching out to an account somewhere (http/sse).
+ *
+ * This is the distinction the write rule below actually needs, and the tool NAME
+ * cannot supply it. A stdio server is a child process in this container: its blast
+ * radius is the container, exactly like the native tools, which is the same
+ * argument that makes an in-workdir `Edit` routine. An http/sse server acts on the
+ * host's Gmail, Drive or tracker — outside the box, where a path argument means
+ * nothing and containment is not a concept.
+ *
+ * Cached briefly because this is consulted on every tool call, and re-read rather
+ * than held forever because the host can install a server mid-life (it takes effect
+ * at the next session spawn anyway).
+ *
+ * Unknown servers are NOT local. That is the fail-closed direction: an unreadable
+ * config, or a name we cannot map, keeps today's stricter behaviour.
+ */
+type McpLookup = () => Array<{ name: string; type: string; plugin?: string }>;
+let mcpLookup: McpLookup = () => listMcps().servers;
+const MCP_LOOKUP_TTL_MS = 30_000;
+let mcpCache: { at: number; local: Set<string> } | null = null;
+
+/** Test seam: swap the source of MCP server definitions. Pass null to restore. */
+export function setMcpLookupForTests(fn: McpLookup | null): void {
+  mcpLookup = fn ?? (() => listMcps().servers);
+  mcpCache = null;
+}
+
+function localMcpServers(): Set<string> {
+  const now = Date.now();
+  if (mcpCache && now - mcpCache.at < MCP_LOOKUP_TTL_MS) return mcpCache.local;
+  const local = new Set<string>();
+  try {
+    for (const srv of mcpLookup()) {
+      if (srv.type !== "stdio") continue;
+      // Two spellings, because claude namespaces a plugin's server as
+      // `plugin_<plugin>_<name>` in the tool name while the config knows it as
+      // `<name>` under `<plugin>`.
+      local.add(srv.name);
+      if (srv.plugin) local.add(`plugin_${srv.plugin}_${srv.name}`);
+    }
+  } catch {
+    /* unreadable config → nothing is known-local → every MCP write stays critical */
+  }
+  mcpCache = { at: now, local };
+  return local;
+}
+
+/** `mcp__<server>__<action>` split into its two halves. */
+function splitMcpTool(toolName: string): { server: string; action: string } {
+  const rest = toolName.slice("mcp__".length);
+  const i = rest.indexOf("__");
+  return i < 0 ? { server: "", action: rest } : { server: rest.slice(0, i), action: rest.slice(i + 2) };
+}
 
 /** git push / force-push in any form: `git push`, `git -C dir push`, `git push --force`. */
 export function isGitPush(command: string): boolean {
@@ -213,7 +270,15 @@ function pathArgsOf(input: unknown): string[] {
  * no boundary to be outside of, and failing closed there would make every such
  * call prompt.
  */
-export function isCriticalTool(toolName: string, input: unknown, cwd?: string | null): boolean {
+export function isCriticalTool(
+  toolName: string,
+  input: unknown,
+  cwd?: string | null,
+  /** The session's own scratch dir (see sessionScratchDir). Counts as inside the
+   *  boundary: it is the agent's own output, and it is per-session so one session
+   *  still cannot read another's. */
+  scratch?: string | null,
+): boolean {
   if (toolName === "Bash") {
     const cmd = (input as { command?: unknown } | null)?.command;
     return typeof cmd === "string" && isCriticalBash(cmd);
@@ -230,13 +295,36 @@ export function isCriticalTool(toolName: string, input: unknown, cwd?: string | 
   // whatever the tool is.
   if (cwd) {
     for (const target of paths) {
-      if (!isPathWithinCwd(cwd, target)) return true;
+      if (!isPathWithinCwd(cwd, target, scratch)) return true;
     }
   }
 
-  // (1b) MCP writes/execs with no path argument we recognise (e.g.
-  // browser_evaluate, write_memory) — see MCP_MUTATING_ACTION.
-  if (isMcpTool(toolName) && MCP_MUTATING_ACTION.test(toolName.slice("mcp__".length))) return true;
+  // (1b) MCP mutations — the FALLBACK for when containment could not answer.
+  //
+  // This is what the comment above MCP_MUTATING_ACTION has always described ("a
+  // heuristic on the action segment", "with no path argument we recognise") and not
+  // what the code did: it tested the verb against `<server>__<action>` and returned
+  // true regardless of any path, so a Serena `replace_content` on a file INSIDE the
+  // workdir outranked a native `Edit` on the same file. Harmless while the cost of a
+  // false positive was one extra card. Now that a critical ask is host-only — and
+  // both relief valves, trust and auto mode, exclude the critical set by design —
+  // that asymmetry meant a guest co-driving a Serena session pinged the host on
+  // every edit, with no way to opt out.
+  //
+  // So: a mutation whose path we checked, inside the workdir, on a server running in
+  // THIS container, is routine like the native equivalent. Everything else stays the
+  // host's: no path to check, no cwd to check against, or a server that acts outside
+  // the box, where the path argument is a claim rather than a boundary.
+  if (isMcpTool(toolName)) {
+    const { server, action } = splitMcpTool(toolName);
+    // Verb matched on the ACTION only. Against `<server>__<action>` a server called
+    // `gdrive-writer` or `run-tools` made every one of its tools critical.
+    if (MCP_MUTATING_ACTION.test(action)) {
+      if (!cwd || paths.length === 0) return true;   // nothing was contained
+      if (!localMcpServers().has(server)) return true; // acts outside this container
+      return false;                                   // contained, in-container
+    }
+  }
 
   return false;
 }

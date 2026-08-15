@@ -66,6 +66,31 @@ function canonicalizeDeepest(abs: string): string | null {
 }
 
 /**
+ * The scratch directory a session may use freely, outside its workdir.
+ *
+ * Why one exists at all: measured on a real auto-mode session, 30 of 72 permission
+ * cards came from the agent writing screenshots and helper scripts to `/tmp` and
+ * then reading them back. Nothing about that is dangerous — it is the agent's own
+ * output — but `/tmp` is outside the workdir, so every read escalated to a human.
+ *
+ * Why it is not just `/tmp`: every session in an install shares one sandbox
+ * container, so a blanket `/tmp` allowance would let one session read another's
+ * scratch with no prompt. Containment between sessions is the thing keeping them
+ * apart. Per-session, it stays contained by construction.
+ *
+ * Bless the path, do not create it: an agent that never uses it costs nothing, and
+ * the system prompt (see SCRATCH_SYSTEM_PROMPT) is what makes it the habit.
+ */
+export function sessionScratchDir(sessionId: string): string | null {
+  // A session id is a uuid from claude, but this builds a filesystem path that
+  // grants relaxed access — so refuse anything that is not plainly one, rather
+  // than letting a crafted id widen the boundary (`../..`, an absolute path, a
+  // separator of any kind).
+  if (!/^[A-Za-z0-9._-]{8,128}$/.test(sessionId) || sessionId.includes("..")) return null;
+  return join("/tmp", "hooop-session", sessionId);
+}
+
+/**
  * True when `target` resolves to `cwd` itself or something beneath it.
  *
  * This is the containment check for TOOL arguments (a Write's file_path, a
@@ -77,12 +102,9 @@ function canonicalizeDeepest(abs: string): string | null {
  * whose unresolved tail contains ".." all return false (i.e. "outside"), so a
  * path we can't reason about escalates to a prompt rather than sliding through.
  */
-export function isPathWithinCwd(cwd: string, target: string): boolean {
+export function isPathWithinCwd(cwd: string, target: string, scratch?: string | null): boolean {
   if (typeof target !== "string" || target.length === 0 || target.includes("\0")) return false;
   if (typeof cwd !== "string" || cwd.length === 0) return false;
-
-  const realCwd = canonicalize(cwd);
-  if (realCwd === null) return false;
 
   // "~" is HOME-relative, never cwd-relative. Without this, `~/.claude/x`
   // fails isAbsolute(), gets joined onto the cwd as a literal directory named
@@ -102,7 +124,25 @@ export function isPathWithinCwd(cwd: string, target: string): boolean {
   const realTarget = canonicalizeDeepest(abs);
   if (realTarget === null) return false;
 
-  return realTarget === realCwd || realTarget.startsWith(realCwd.endsWith(sep) ? realCwd : realCwd + sep);
+  // An unresolvable cwd is still "outside" for the cwd test — the fail-closed
+  // behaviour this function has always had — but it must not shadow the scratch
+  // test below, which does not depend on the cwd at all. Nesting them cost the
+  // scratch allowance entirely whenever a cwd could not be canonicalized.
+  const realCwd = canonicalize(cwd);
+  if (realCwd !== null && within(realTarget, realCwd)) return true;
+
+  // The session's own scratch dir counts as inside. Resolved the same way (so a
+  // symlink out of it does not pass) and only when the caller supplies one — a
+  // slot-less call has no session, and therefore no scratch.
+  if (scratch) {
+    const realScratch = canonicalize(scratch) ?? scratch;
+    if (within(realTarget, realScratch)) return true;
+  }
+  return false;
+}
+
+function within(target: string, root: string): boolean {
+  return target === root || target.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 
 /**
