@@ -54,11 +54,14 @@ function localMcpServers(): Set<string> {
   try {
     for (const srv of mcpLookup()) {
       if (srv.type !== "stdio") continue;
-      // Two spellings, because claude namespaces a plugin's server as
-      // `plugin_<plugin>_<name>` in the tool name while the config knows it as
-      // `<name>` under `<plugin>`.
-      local.add(srv.name);
+      // A plugin's server appears in tool names ONLY as `plugin_<plugin>_<name>`
+      // (`mcp__plugin_hooop_tools__…`), while the config knows it as `<name>` under
+      // `<plugin>`. Register the namespaced spelling for those and the bare name
+      // for everything else — registering both would let a local plugin server
+      // named `github` vouch for a REMOTE user-scoped `github`, whose writes would
+      // then read as in-container and stop asking.
       if (srv.plugin) local.add(`plugin_${srv.plugin}_${srv.name}`);
+      else local.add(srv.name);
     }
   } catch {
     /* unreadable config → nothing is known-local → every MCP write stays critical */

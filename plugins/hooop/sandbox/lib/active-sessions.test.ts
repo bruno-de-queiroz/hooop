@@ -251,6 +251,14 @@ describe("startNewConversation", () => {
     expect(sp).toBeGreaterThanOrEqual(0);
     expect(args[sp + 1]).toMatch(/submit_plan/);
     expect(args[sp + 1]).toMatch(/plan mode/i);
+    // And it rides there TOGETHER with every other steer, in ONE flag. The CLI
+    // keeps only the last `--append-system-prompt` and silently drops earlier
+    // ones, so a second flag doesn't add a steer, it deletes this one. An earlier
+    // version of this test used indexOf and passed while the value it asserted on
+    // was being thrown away at spawn: the first flag was the plan prompt, the
+    // second (scratch) was what claude actually received.
+    expect(args.filter((a: string) => a === "--append-system-prompt")).toHaveLength(1);
+    expect(args[sp + 1]).toContain(`/tmp/hooop-session/${sessionId}`);
   });
 });
 

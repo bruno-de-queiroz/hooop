@@ -22,7 +22,7 @@ import { STATE_DIR, CLAUDE_SESSIONS_DIR, SESSIONS_ROOT, sessionWorkdir, HOOK_SOC
 import { ingestEventLine } from "./ingestor";
 import { deleteEventsForSessions, listEventSessionIds } from "./db";
 import { discoverInstalledPluginDirs } from "./plugin-paths";
-import { isCwdAllowed, sessionScratchDir } from "./cwd-policy";
+import { ensureSessionScratch, isCwdAllowed, sessionScratchDir } from "./cwd-policy";
 import { bashConfinementEnv } from "./landlock-policy";
 import { isCriticalBash, isCriticalTool } from "./peer-policy";
 import {
@@ -2800,12 +2800,13 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
   // unreachable or times out, the gate defaults to DENY (not pass-through),
   // so the agent can never bypass the dashboard without explicit approval.
   args.push("--permission-mode", "bypassPermissions");
-  // Standing plan-mode steering (invisible to the transcript, inert outside plan
-  // mode). Headless drops the native ExitPlanMode the built-in plan prompt tells
-  // the model to use, so without this the model often ends a plan turn by writing
-  // the plan as prose and never calls the MCP submit_plan — nothing is captured
-  // and no plan panel appears. See PLAN_SYSTEM_PROMPT.
-  args.push("--append-system-prompt", PLAN_SYSTEM_PROMPT);
+  // Standing steers, appended to the system prompt. Collected here and pushed as
+  // ONE `--append-system-prompt` further down, because the flag does NOT
+  // accumulate: passing it twice keeps the LAST occurrence and silently drops the
+  // earlier one (verified against the CLI — two markers in, only the second comes
+  // back). A second push would therefore delete the plan steering rather than add
+  // to it, with no error to notice.
+  const systemSteers: string[] = [PLAN_SYSTEM_PROMPT];
   // Effective model: the explicit --model when set, else claude's own
   // configured default resolved from its config (so the auto-compact window is
   // sized to the real model at spawn instead of guessing). We pass it to claude
@@ -2835,14 +2836,18 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
     args.push("--session-id", sessionId);
   }
 
-  // Where scratch belongs — appended here rather than with the plan prompt above,
+  // Where scratch belongs — collected here rather than next to the plan steer,
   // because the path it names is per-session and `sessionId` is only settled now.
-  // Skipped entirely if the id doesn't validate: steering the agent at a directory
-  // that is NOT inside its boundary would be worse than saying nothing.
-  const scratchDir = sessionScratchDir(sessionId);
+  // Skipped entirely when the directory isn't usable (an id that doesn't validate,
+  // or something already sitting at the path that isn't a directory we made):
+  // steering the agent at a path that is NOT inside its boundary, or at one an
+  // attacker pre-planted, would be worse than saying nothing.
+  const scratchDir = ensureSessionScratch(sessionId);
   if (scratchDir) {
-    args.push("--append-system-prompt", SCRATCH_SYSTEM_PROMPT.replace("{{SCRATCH}}", scratchDir));
+    systemSteers.push(SCRATCH_SYSTEM_PROMPT.replace("{{SCRATCH}}", scratchDir));
   }
+  // One flag, joined — see the note where systemSteers is declared.
+  args.push("--append-system-prompt", systemSteers.join("\n\n"));
 
   // Auto-compaction is always on. `ctxWindow` is the model-bound window sized
   // from the effective model (explicit or resolved default); it's null only

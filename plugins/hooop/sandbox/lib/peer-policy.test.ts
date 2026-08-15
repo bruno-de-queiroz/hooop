@@ -270,6 +270,22 @@ describe("isCriticalTool — MCP writes decided by transport, not by name", () =
     expect(isCriticalTool("mcp__unknown-thing__write_file", { path: join(cwd, "a") }, cwd)).toBe(true);
   });
 
+  it("does not let a local plugin server vouch for a remote one of the same name", () => {
+    // A plugin's server only ever appears in tool names as `plugin_<plugin>_<name>`,
+    // so registering its bare name too would make the local `github` answer for the
+    // REMOTE `github` — whose writes would stop asking, on the strength of a name
+    // collision between two different scopes.
+    setMcpLookupForTests(() => [
+      { name: "github", type: "stdio", plugin: "some-plugin" }, // in-container
+      { name: "github", type: "http" },                        // acts on the real repo
+    ]);
+    expect(isCriticalTool("mcp__github__create_or_update_file", { path: join(cwd, "a.ts") }, cwd)).toBe(true);
+    // The plugin one, under the name it actually uses, stays routine.
+    expect(
+      isCriticalTool("mcp__plugin_some-plugin_github__create_or_update_file", { path: join(cwd, "a.ts") }, cwd),
+    ).toBe(false);
+  });
+
   it("resolves a plugin server under its namespaced tool name", () => {
     expect(
       isCriticalTool("mcp__plugin_claude-mem_mcp-search__build_corpus", { path: join(cwd, "c") }, cwd),
