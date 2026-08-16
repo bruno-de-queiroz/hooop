@@ -124,7 +124,15 @@ import { peerBashAllowed, isCriticalBash } from "./lib/peer-policy";
  * this route's own 10-minute command cap — the request was always allowed to be
  * long-lived; now some of that time can be spent waiting for a human.
  */
-const BASH_SHORTCUT_APPROVAL_MS = 120_000;
+// How long a guest's critical `!bash` waits for the host. Kept UNDER the tunnel's
+// own ceiling on purpose: a peer reaches the dashboard through cloudflared, and
+// Cloudflare's edge cuts an HTTP request at ~100s with a 524. Waiting longer than
+// that cannot help the guest — they would see the edge's error instead of ours —
+// and it makes the worst failure mode possible: if the host approves at, say, 110s,
+// the command RUNS while the guest has already been told it failed. So the window
+// ends before the edge can intervene, and the dashboard's own client timeout
+// (see runBashShortcut) sits just above this so THIS is the timeout that fires.
+const BASH_SHORTCUT_APPROVAL_MS = 90_000;
 import {
   PreviewError,
   emitPreviewEvent,

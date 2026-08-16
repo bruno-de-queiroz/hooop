@@ -581,7 +581,18 @@ export function createHttpClient(socketPath: string): SandboxClient {
     sendChat: (sessionId, text, images, participant) =>
       request("POST", `/sessions/${encodeURIComponent(sessionId)}/chat`, images && images.length ? { text, images } : { text }, participantOpts(participant)),
     runBashShortcut: (sessionId, command, participant) =>
-      request("POST", `/sessions/${encodeURIComponent(sessionId)}/bash`, { command }, participantOpts(participant)),
+      request("POST", `/sessions/${encodeURIComponent(sessionId)}/bash`, { command }, {
+        ...participantOpts(participant),
+        // Just above the sandbox's BASH_SHORTCUT_APPROVAL_MS (90s), so the sandbox's
+        // timeout is the one that fires and the guest gets its message rather than a
+        // bare 504. On the default 30s this request aborted first, the sandbox saw
+        // the response close and WITHDREW the ask (by design — an ask nobody waits
+        // on should not sit on the host's screen), so a guest's `rm -rf` gave the
+        // host 30 seconds, then vanished from their screen. Seen end to end with a
+        // real peer share. Both numbers stay under Cloudflare's ~100s edge timeout;
+        // see the note on BASH_SHORTCUT_APPROVAL_MS for why that ceiling decides it.
+        timeoutMs: 95_000,
+      }),
     listPendingRequests: (sessionId) =>
       request("GET", `/sessions/${encodeURIComponent(sessionId)}/pending-requests`),
     respondToPermission: (sessionId, requestId, decision, participant, scope, feedback) =>

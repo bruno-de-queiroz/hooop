@@ -145,11 +145,35 @@ const ENV_DUMP_PATTERNS: RegExp[] = [
 // those is capability, not text — see the note on SECRET_PATTERNS about the gh
 // token, which no kernel rule stops.
 const CONSTRUCTED_EXEC_PATTERNS: RegExp[] = [
-  /\beval\b/i,
-  /\bsource\s/i,
+  // Anchored to COMMAND POSITION, not "mentions the word". Unanchored, these
+  // refused `cat eval-results.md` and `grep -rn source src/` — and a refusal has no
+  // recourse at all: the host cannot approve it either, so a false positive here is
+  // worse than one on a card. Same reasoning ENV_DUMP_PATTERNS already uses to allow
+  // `env FOO=bar cmd` while blocking a bare `env`.
+  /(^|[;&|(]\s*|&&\s*|\|\|\s*)eval\b/i,
+  /(^|[;&|(]\s*|&&\s*|\|\|\s*)source\s/i,
   /(^|[;&|]\s*)\.\s+\S/,                    // `. ./script`
   /\b(ba|z|k|da)?sh\s+(-[a-z]*\s+)*-c\b/i,   // sh -c, bash -lc, zsh -c
 ];
+
+/**
+ * A `git` INVOCATION, as opposed to the word "git" appearing anywhere.
+ *
+ * Used only for the peer refusal, where isGitCommand's "any mention" cost too much:
+ * it refused `grep -rn git README.md` and `ls git-hooks/` outright, with no way for
+ * the host to allow them. Measured on real data, 6 of 38 matches of the broad
+ * pattern were that kind of phantom.
+ *
+ * isCriticalBash keeps the BROAD check on purpose, and the asymmetry is the point.
+ * There, a false positive costs one card the host can answer, while a false negative
+ * means auto mode runs git unattended — so it errs the other way. Here the failure
+ * modes are reversed. And nothing is lost by anchoring: a git invocation this misses
+ * still hits isCriticalBash and escalates to the host, so the peer never runs git
+ * unattended either way.
+ */
+function isGitInvocation(command: string): boolean {
+  return /(^|[;&|(]\s*|&&\s*|\|\|\s*)(\w+=\S*\s+)*git\b/i.test(command);
+}
 
 // Irreversible / high-blast-radius commands. In auto mode — and on the `!bash`
 // fast lane when a GUEST is driving it — these prompt the host instead of running
@@ -188,7 +212,7 @@ export function peerBashAllowed(command: string): PolicyResult {
   // remote set-url`, `git config credential.helper`, a `core.pager` that runs a
   // command, `git bundle` — the ways to push or to leak through git are not a
   // subcommand list. isGitCommand already carries that argument for auto mode.
-  if (isGitCommand(command)) {
+  if (isGitInvocation(command)) {
     return { ok: false, reason: "git is host-only in a shared session" };
   }
   for (const re of CONSTRUCTED_EXEC_PATTERNS) {

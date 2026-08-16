@@ -45,6 +45,25 @@ describe("peerBashAllowed", () => {
     expect(peerBashAllowed("git status").ok).toBe(false);
     expect(peerBashAllowed("git config credential.helper store").ok).toBe(false);
     expect(peerBashAllowed("git remote set-url origin git@evil:x").ok).toBe(false);
+    // Reached from anywhere a command can start, not just the front of the line.
+    expect(peerBashAllowed("cd sub && git push").ok).toBe(false);
+    expect(peerBashAllowed("GIT_SSH_COMMAND=x git push").ok).toBe(false);
+    expect(peerBashAllowed("git -C /repo push").ok).toBe(false);
+    expect(peerBashAllowed("$(git push)").ok).toBe(false);
+  });
+
+  it("does not refuse commands that merely CONTAIN these words", () => {
+    // A refusal has no recourse — the host cannot approve it either — so a false
+    // positive here is worse than one on a card. `\bgit\b` anywhere refused
+    // `grep -rn git README.md`; 6 of 38 matches on real data were that shape.
+    expect(peerBashAllowed("grep -rn git README.md").ok).toBe(true);
+    expect(peerBashAllowed("ls git-hooks/").ok).toBe(true);
+    expect(peerBashAllowed("cat eval-results.md").ok).toBe(true);
+    expect(peerBashAllowed("grep -rn source src/").ok).toBe(true);
+    expect(peerBashAllowed("npm run eval").ok).toBe(true);
+    // And what they miss still escalates: isCriticalBash keeps the broad check, so
+    // a git invocation this lets through becomes a host card, never a silent run.
+    expect(isCriticalBash("xargs git push")).toBe(true);
   });
 
   it("blocks running a string the peer constructed", () => {
