@@ -258,7 +258,10 @@ describe("startNewConversation", () => {
     // was being thrown away at spawn: the first flag was the plan prompt, the
     // second (scratch) was what claude actually received.
     expect(args.filter((a: string) => a === "--append-system-prompt")).toHaveLength(1);
-    expect(args[sp + 1]).toContain(`/tmp/hooop-session/${sessionId}`);
+    // The scratch steer rides in the same flag. It names `./tmp` (inside the
+    // workdir) rather than a per-session /tmp path, which is why it no longer has
+    // to be built from the session id.
+    expect(args[sp + 1]).toContain("`./tmp`");
   });
 });
 

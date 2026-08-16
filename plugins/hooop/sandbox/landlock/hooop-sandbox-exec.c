@@ -325,6 +325,24 @@ int main(int argc, char **argv) {
 
 	const int permissive = is_permissive();
 
+	/* Restore TMPDIR from TMP when it is missing.
+	 *
+	 * TMPDIR is on glibc's unsecvars list, so exec'ing the setuid hooop-as-agent
+	 * helper strips it from the environment while TMP and TEMP (not on that list)
+	 * survive. The server sets all three to the session's own ./tmp, so without
+	 * this the only one that mattered to coreutils is the one that never arrives:
+	 * `mktemp` honours TMPDIR alone and would drop its files in the /tmp every
+	 * session shares, which is exactly what pointing the vars somewhere private
+	 * was for. Verified on a live session: TMP and TEMP present, TMPDIR absent.
+	 *
+	 * Safe here rather than in the setuid helper: this binary is not setuid and
+	 * runs as the model's uid already, so nothing privileged reads the value. Only
+	 * ever fills a gap, never overrides a TMPDIR the caller set deliberately. */
+	if (getenv("TMPDIR") == NULL) {
+		const char *tmp = getenv("TMP");
+		if (tmp != NULL && *tmp != '\0') setenv("TMPDIR", tmp, 1);
+	}
+
 	/* --- Step 1: query the kernel's supported Landlock ABI version. ---
 	 * Per the landlock(7) man page, calling landlock_create_ruleset with a
 	 * NULL attr pointer and LANDLOCK_CREATE_RULESET_VERSION as the flags

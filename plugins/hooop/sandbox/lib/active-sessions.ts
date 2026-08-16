@@ -22,7 +22,7 @@ import { STATE_DIR, CLAUDE_SESSIONS_DIR, SESSIONS_ROOT, sessionWorkdir, HOOK_SOC
 import { ingestEventLine } from "./ingestor";
 import { deleteEventsForSessions, listEventSessionIds } from "./db";
 import { discoverInstalledPluginDirs } from "./plugin-paths";
-import { ensureSessionScratch, isCwdAllowed, sessionScratchDir } from "./cwd-policy";
+import { isCwdAllowed, sessionTmpDir } from "./cwd-policy";
 import { bashConfinementEnv } from "./landlock-policy";
 import { isCriticalBash, isCriticalTool } from "./peer-policy";
 import {
@@ -1528,30 +1528,33 @@ const PLAN_SYSTEM_PROMPT =
   "call `submit_plan`. Investigate first with Read/Grep/Glob, then submit.";
 
 /**
- * Standing steer about where scratch goes.
+ * Standing steer about where temporary files go.
  *
  * Measured on a real auto-mode session: 30 of 72 permission cards were the agent
  * writing screenshots and helper scripts to `/tmp/…` and then reading them back.
  * Every read escalated to a human, because `/tmp` is outside the session workdir —
  * which is true, and completely beside the point: it was the agent's own output.
  *
- * The session workdir has always been writable without a prompt. The model used
- * `/tmp` out of habit, so this is a habit fix rather than a policy one, and it costs
- * nothing in containment: both directories named here are inside the boundary
- * already (the workdir by definition, the scratch dir by sessionScratchDir).
+ * The workdir has always been writable without a prompt, so this is a habit fix
+ * rather than a policy one. It names `./tmp` because that is inside the workdir,
+ * which makes it free in every layer at once: routine for the model's file tools,
+ * inside the Landlock allow-list for its shell, and invisible to other sessions
+ * because their shells are confined to their own workdirs. $TMPDIR points there too,
+ * so a tool that never read this prompt still lands in the right place.
  *
- * `{{SCRATCH}}` is substituted per session, because the blessed path is
- * per-session — a shared `/tmp` allowance would let one session read another's
- * scratch, and every session in an install shares one container.
+ * Strongly worded on purpose. It is the only thing standing between the model and
+ * the shared /tmp, whose cross-session exposure is an accepted risk rather than a
+ * closed one — see sessionTmpDir() for why narrowing /tmp itself was reverted.
  */
 const SCRATCH_SYSTEM_PROMPT =
-  "Keep temporary files inside this session's own directories: your working " +
-  "directory for anything related to the task, or {{SCRATCH}} for throwaway " +
-  "scratch (screenshots, one-off scripts, intermediate output). Both are writable " +
-  "without asking. Writing or reading elsewhere — /tmp directly, another " +
-  "session's folder, anything outside your working directory — interrupts the " +
-  "human for approval every time, so prefer these two even for files you intend " +
-  "to delete straight after.";
+  "ALL temporary files go in `./tmp` (a `tmp` directory inside your working " +
+  "directory) — screenshots, one-off scripts, intermediate output, anything you " +
+  "intend to delete straight after. It already exists and $TMPDIR points at it. " +
+  "Never use /tmp, /var/tmp or any absolute path outside your working directory " +
+  "for scratch: /tmp is shared with every other session in this container, so " +
+  "writing there both leaks your output to them and interrupts the human for " +
+  "approval on every read back. If a tool insists on an absolute path, use the " +
+  "absolute path of `./tmp` instead.";
 
 // The interactive tools headless mode lacks come from the bundled hooop MCP
 // server (see plugins/hooop/.mcp.json + mcp/tools-server.mjs). Claude namespaces
@@ -2825,6 +2828,7 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
   // defensive swap block below can still reassign it if claude ever reports a
   // different id (resume edge cases).
   let sessionId = opts.resumeSessionId ?? opts.freshSessionId ?? randomUUID();
+
   if (opts.resumeSessionId) {
     args.push("--resume", opts.resumeSessionId);
     // Defensive: `claude --resume` has historically been able to mint a NEW
@@ -2836,16 +2840,7 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
     args.push("--session-id", sessionId);
   }
 
-  // Where scratch belongs — collected here rather than next to the plan steer,
-  // because the path it names is per-session and `sessionId` is only settled now.
-  // Skipped entirely when the directory isn't usable (an id that doesn't validate,
-  // or something already sitting at the path that isn't a directory we made):
-  // steering the agent at a path that is NOT inside its boundary, or at one an
-  // attacker pre-planted, would be worse than saying nothing.
-  const scratchDir = ensureSessionScratch(sessionId);
-  if (scratchDir) {
-    systemSteers.push(SCRATCH_SYSTEM_PROMPT.replace("{{SCRATCH}}", scratchDir));
-  }
+  systemSteers.push(SCRATCH_SYSTEM_PROMPT);
   // One flag, joined — see the note where systemSteers is declared.
   args.push("--append-system-prompt", systemSteers.join("\n\n"));
 
@@ -2892,7 +2887,24 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
   // separately by path-containment in createPermissionRequest. And the child
   // still inherits this process's env, so env-borne secrets are not protected
   // by Landlock at all.
-  Object.assign(childEnv, confinement ?? {}); // resolved at the top of this function
+  // `./tmp` inside the workdir: the session's scratch dir (see sessionTmpDir).
+  // Created with the workdir's shared mode so both uids can use it — the server
+  // makes it, the model writes in it — and pointed at by the temp env vars so a
+  // tool that never read the system prompt still stays out of the shared /tmp.
+  // TMP/TEMP alongside TMPDIR because plenty of tooling reads those instead.
+  const sessionTmp = sessionTmpDir(opts.cwd);
+  try {
+    mkdirShared(sessionTmp);
+    childEnv.TMPDIR = sessionTmp;
+    childEnv.TMP = sessionTmp;
+    childEnv.TEMP = sessionTmp;
+  } catch (err) {
+    // Not fatal: without it the model falls back to /tmp and pays in prompts,
+    // which is worse than it was but not broken.
+    log.warn("active-sessions", "could not create the session tmp dir", { sessionTmp, err: String(err) });
+  }
+
+  Object.assign(childEnv, confinement ?? {}); // resolved with scratchDir, above
 
   // Point the hook scripts (children of this claude) at the HOOK socket rather
   // than the control one. They read HOOOP_SANDBOX_SOCKET and are otherwise
@@ -3051,7 +3063,7 @@ async function spawnControllable(opts: SpawnOpts): Promise<{ sessionId: string; 
             // becomes a card as-is — so criticality has to be stamped here too, or
             // the permission route sees an unflagged ask and lets a full peer
             // answer their own turn's destructive command.
-            markCritical(pending, slot.meta.cwd, slot.meta.sessionId);
+            markCritical(pending, slot.meta.cwd);
             slot.pendingRequests.push(pending);
             const eventLine = JSON.stringify({
               ts: new Date().toISOString(),
@@ -4425,9 +4437,9 @@ async function runPageTool(
  * full-capability peer the flag exists to keep away from it. A fail-open with no
  * symptom: the card still appears, it just accepts the wrong person's answer.
  */
-function markCritical(pending: PendingPermissionRequest, cwd: string | null, sessionId?: string | null): boolean {
+function markCritical(pending: PendingPermissionRequest, cwd: string | null): boolean {
   pending.critical =
-    isCriticalTool(pending.toolName, pending.input, cwd, sessionId ? sessionScratchDir(sessionId) : null) ||
+    isCriticalTool(pending.toolName, pending.input, cwd) ||
     // Publishing agent-written code to a public URL is a human decision every
     // time, in every mode — and the host's, not a guest's.
     previewToolAction(pending.toolName) === "share";
@@ -4566,7 +4578,7 @@ export function createPermissionRequest(opts: {
     // credential is the first half of an exfiltration chain, and plan mode is
     // otherwise a wide-open read surface. Contained reads pass; anything
     // reaching outside the workdir still needs a human.
-    if (isCriticalTool(opts.toolName, pending.input, slot.meta.cwd, sessionScratchDir(slot.meta.sessionId))) {
+    if (isCriticalTool(opts.toolName, pending.input, slot.meta.cwd)) {
       return decideNow(
         "deny",
         "Plan mode: that path is outside this session's working directory. Investigate within the workdir, then submit your plan with the submit_plan tool.",
@@ -4649,7 +4661,7 @@ export function createPermissionRequest(opts: {
   // overwhelmingly common case (a read inside the workdir); only an escape
   // escalates.
   if (READ_FAST_LANE_TOOLS.has(opts.toolName)) {
-    if (!isCriticalTool(opts.toolName, pending.input, slot?.meta.cwd ?? null, slot ? sessionScratchDir(slot.meta.sessionId) : null)) {
+    if (!isCriticalTool(opts.toolName, pending.input, slot?.meta.cwd ?? null)) {
       return decideNow("allow", "auto-allowed (read, within workdir)");
     }
     // Outside the workdir / a secret path → fall through to a dashboard prompt.
@@ -4721,7 +4733,7 @@ export function createPermissionRequest(opts: {
   // it does — the permission route reads it to keep a critical ask host-only, and
   // the dashboard reads it to show a peer a waiting state instead of buttons they
   // must not have.
-  const critical = markCritical(pending, slot?.meta.cwd ?? null, slot?.meta.sessionId ?? null);
+  const critical = markCritical(pending, slot?.meta.cwd ?? null);
 
   // The ask tool gates those same branches, for a sharper reason than the
   // critical set: an unattended approval of an ask does not merely skip a

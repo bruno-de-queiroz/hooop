@@ -113,6 +113,7 @@ import {
   setCanonicalResolver,
   PushOwnershipError,
 } from "./lib/push";
+import { removeLegacyScratchRoot, sessionTmpDir } from "./lib/cwd-policy";
 import { peerBashAllowed, isCriticalBash } from "./lib/peer-policy";
 
 /**
@@ -1020,6 +1021,13 @@ add("POST", "/sessions/:id/bash", async (req, res, params) => {
   // the asymmetry that would quietly become the whole exposure if a directory
   // mode ever regressed.
   const shellEnv = { ...process.env, ...landlocked.env };
+  // Same scratch dir the model's own shell gets (see sessionTmpDir): a `!bash`
+  // mktemp should land in the session's own tree, not in the /tmp every session
+  // shares. Set unconditionally — the directory is created at spawn, and a stale
+  // value here would point a guest's shell at the server's own temp dir.
+  shellEnv.TMPDIR = sessionTmpDir(cwd);
+  shellEnv.TMP = shellEnv.TMPDIR;
+  shellEnv.TEMP = shellEnv.TMPDIR;
   shellEnv.HOOOP_SANDBOX_SOCKET = HOOK_SOCKET_PATH;
   delete shellEnv.HOOOP_SANDBOX_TOKEN_FILE;
   delete shellEnv.HOOOP_AS_AGENT;
@@ -2886,6 +2894,9 @@ async function main() {
   // Same per-run discard as shares, and for the same reason: a device grant is
   // bound to the tunnel hostname, which is new on every start.
   bootHostDevices();
+  // One-time migration: scratch used to live in the shared /tmp. See
+  // removeLegacyScratchRoot — the model's uid cannot clear it, so we do.
+  removeLegacyScratchRoot();
   startSessionsWatcher();
   startSkillsWatcher();
   startIngestor();

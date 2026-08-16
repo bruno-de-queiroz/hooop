@@ -351,10 +351,25 @@ describe("a guest's destructive `!bash` asks the host", () => {
   });
 
   it("runs it once the host allows", async () => {
+    // Was `git --version`. Git is no longer escalatable for a guest at all: it is
+    // refused outright (see the next test), so it cannot exercise the approve-then-run
+    // path any more. A destructive command still can, which is the path this covers.
     verdict = { decision: "allow" };
-    const res = await bash("git --version", "peer:share-1");
+    const res = await bash("rm -rf build", "peer:share-1");
     expect(res.status).toBe(200);
     expect(createPermissionRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses git and constructed strings outright, with no card for the host", async () => {
+    // The host cannot approve these on a guest's behalf, by request: a peer may not
+    // git push or read host credentials "not even if the peer is full", and there is
+    // no version of `eval "$(…)"` a host can meaningfully read on a card.
+    for (const cmd of ["git status", "git push", "eval \"$x\"", "sh -c 'git push'"]) {
+      createPermissionRequest.mockClear();
+      const res = await bash(cmd, "peer:share-1");
+      expect(res.status).toBe(403);
+      expect(createPermissionRequest).not.toHaveBeenCalled();
+    }
   });
 
   it("says the host DECLINED, using their reason", async () => {

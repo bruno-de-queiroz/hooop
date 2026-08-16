@@ -14,7 +14,7 @@
  * cannot point outside it to bypass the policy.
  */
 
-import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { log } from "@shared/logger";
@@ -66,139 +66,68 @@ function canonicalizeDeepest(abs: string): string | null {
 }
 
 /**
- * The scratch directory a session may use freely, outside its workdir.
+ * The per-session scratch directory: `<cwd>/tmp`.
  *
- * Why one exists at all: measured on a real auto-mode session, 30 of 72 permission
- * cards came from the agent writing screenshots and helper scripts to `/tmp` and
- * then reading them back. Nothing about that is dangerous — it is the agent's own
- * output — but `/tmp` is outside the workdir, so every read escalated to a human.
+ * Why one exists: measured on a real auto-mode session, 30 of 72 permission cards
+ * were the agent writing screenshots and helper scripts somewhere temporary and
+ * reading them back. Its own output, escalating to a human every time.
  *
- * Why it is not just `/tmp`: every session in an install shares one sandbox
- * container, so a blanket `/tmp` allowance would let one session's Read/Write/Edit
- * reach another's scratch with no prompt at all. Per-session, that ask escalates
- * like any other path outside the workdir (verified live: a symlinked scratch dir
- * produced a card under auto mode).
+ * Why it lives INSIDE the workdir, which is the whole point: the workdir is already
+ * the one place a session may read and write freely, for the model's file tools AND
+ * for its Landlock-confined shell. So this needs no policy of its own — no blessed
+ * path outside the boundary, no allow-list entry, no check that something hostile
+ * has not taken the name. It is simply in the cwd.
  *
- * What this does NOT isolate, so nobody reads more into it than it earns: Bash.
- * Landlock hands a confined session the whole of `$TMPDIR` read-write (see
- * landlockSpawnEnv) and a Bash command is judged by its text, not by path
- * containment, so `cat /tmp/hooop-session/<other-id>/x` is not stopped here. That
- * predates this directory — sessions have always shared /tmp — but a predictable
- * per-session path makes it aimable, and every session runs as the same `agent`
- * uid, so no mode can help either. Real isolation between sessions needs separate
- * uids or per-session tmpfs, not a policy check.
+ * The previous version put it at `/tmp/hooop-session/<id>` and cost three separate
+ * bugs to defend, all the same question in a different syscall: /tmp is shared by
+ * every session in the container, so a blessed path there needs a symlink check on
+ * the leaf, on the parent, and on every comparison. Inside the cwd, none of that
+ * applies.
  *
- * The path is blessed here; ensureSessionScratch() prepares the area around it,
- * scratchIfSafe() refuses to honour a poisoned one, and the session itself creates
- * the directory. The system prompt (see SCRATCH_SYSTEM_PROMPT) makes it the habit.
+ * TMPDIR, TMP and TEMP are all pointed here at spawn (see the arg builder), so
+ * mktemp, tempfile and os.tmpdir() land here rather than in the shared /tmp — which
+ * is what makes this hold for tools that never read the system prompt. All three,
+ * because TMPDIR alone does not survive: it is on glibc's unsecvars list and the
+ * setuid hooop-as-agent step strips it, so hooop-sandbox-exec restores it from TMP.
+ *
+ * Recorded because it cost a wrong conclusion: narrowing Landlock to the old /tmp
+ * scratch dir was tried and reverted after every Bash command started exiting 1 on
+ * `/tmp/claude-<pid>-cwd`, which looked like claude hardcoding /tmp. It was not.
+ * claude uses os.tmpdir(), and TMPDIR had been stripped while TMP/TEMP were unset.
+ * With all three set, claude's own temp state moves in here too (verified live:
+ * `claude-1000` appears under ./tmp), so that option is open again if the shared
+ * /tmp ever stops being an acceptable risk.
  */
-export function sessionScratchDir(sessionId: string): string | null {
-  // A session id is a uuid from claude, but this builds a filesystem path that
-  // grants relaxed access — so refuse anything that is not plainly one, rather
-  // than letting a crafted id widen the boundary (`../..`, an absolute path, a
-  // separator of any kind).
-  if (!/^[A-Za-z0-9._-]{8,128}$/.test(sessionId) || sessionId.includes("..")) return null;
-  return join("/tmp", "hooop-session", sessionId);
+export function sessionTmpDir(cwd: string): string {
+  return join(cwd, "tmp");
 }
 
-/** Canonical /tmp, resolved once — a scratch dir may never lead outside it. */
-const SCRATCH_ROOT = canonicalize("/tmp") ?? "/tmp";
-
 /**
- * The scratch dir to trust for a containment check, or null to not trust one.
+ * Remove the scratch root a previous version of hooop created at
+ * `/tmp/hooop-session`, once, at boot.
  *
- * `/tmp` is world-writable and every session in an install shares one container
- * under one uid, so the path this returns is a path OTHER sessions can write.
- * Blessing it without checking what is actually there turns the allowance into an
- * arbitrary-read primitive: plant
+ * Sessions used to be steered at `/tmp/hooop-session/<id>` before scratch moved
+ * inside the workdir (see sessionTmpDir). The directory is ours — created by this
+ * uid, 1777 — and every session subdirectory under it belongs to the model's uid,
+ * which cannot delete the parent because /tmp is sticky. So the server has to be
+ * the one to clear it, or an upgraded install keeps last version's scratch (and
+ * whatever was written in it) lying around in a world-writable directory forever.
  *
- *     ln -s /home/agent/.claude/projects /tmp/hooop-session/<victim-session-id>
- *
- * before the victim first uses its scratch, and every read "inside its own scratch"
- * silently resolves into someone else's transcripts — approved with no card,
- * because we told the gate that directory was contained. Two checks close it:
- *
- *  1. the leaf must be a real directory. lstat (not stat) so a symlink fails the
- *     isDirectory() test even when it points at one.
- *  2. the resolved path must still be under /tmp, which catches the same trick
- *     played on the `/tmp/hooop-session` parent instead of the leaf.
- *
- * A path that doesn't exist yet is fine and stays blessed — that's the first write
- * into a fresh scratch dir. Anything suspicious just loses the allowance and goes
- * back to prompting, which is exactly how it behaved before scratch existed.
+ * Idempotent and non-fatal: nothing depends on this succeeding.
  */
-function scratchIfSafe(scratch: string): string | null {
-  let planted = false;
+export function removeLegacyScratchRoot(): void {
+  const legacy = join("/tmp", "hooop-session");
   try {
-    planted = !lstatSync(scratch).isDirectory();
+    if (!lstatSync(legacy).isDirectory()) return; // not ours to delete
   } catch {
-    // Nothing there (or an unreadable parent) — the not-yet-created case, i.e. the
-    // first write into a fresh scratch dir. Resolve it the same way the target gets
-    // resolved: comparing an UNresolved scratch against a canonical target is how
-    // you get a wrong answer on a host where /tmp is itself a symlink (macOS
-    // /private/tmp), and it also quietly re-opens the parent-symlink case this
-    // function exists to close.
-    const real = canonicalizeDeepest(scratch);
-    return real !== null && within(real, SCRATCH_ROOT) ? real : null;
+    return; // already gone, the normal case after the first boot
   }
-  if (planted) return null;
-  const real = canonicalize(scratch);
-  if (real === null || !within(real, SCRATCH_ROOT)) return null;
-  return real;
-}
-
-/**
- * Prepare the scratch area for a session and return the dir to steer it at, or
- * null when the path can't be trusted (no scratch allowance, back to prompting).
- *
- * This process is NOT the session. The sandbox server runs as `hooopd`; a
- * session's claude runs as `agent` (uid 1000). So this deliberately creates only
- * the PARENT, and creates it writable + sticky exactly like /tmp — the session
- * makes its own leaf, as itself, on first use.
- *
- * An earlier version created the leaf here with mode 0700, which read as the safe
- * choice and broke the feature outright: the parent came out `hooopd:hooopctl
- * 0700`, the agent could not even traverse into it (`mkdir: Permission denied`),
- * and a model steered at an unusable directory falls straight back to /tmp and
- * prompts for everything. Hence also the explicit chmod: an existing parent keeps
- * its old mode, and one install already has the 0700 one to repair.
- *
- * Pre-creating the leaf would buy nothing anyway — every session runs as the same
- * `agent` uid, so no mode can keep one session out of another's directory.
- * scratchIfSafe() on every containment check is the defense that actually holds.
- */
-export function ensureSessionScratch(sessionId: string): string | null {
-  const dir = sessionScratchDir(sessionId);
-  if (!dir) return null;
-  const parent = dirname(dir);
   try {
-    // lstat the parent BEFORE touching it. `mkdir -p` succeeds silently on a
-    // symlink-to-directory and `chmod` follows symlinks, so a link planted at this
-    // name turns the two calls below into "widen the attacker's chosen directory to
-    // 1777" — and this process owns both ~/.claude and /var/run/hooop, whose whole
-    // security property is its 0750 mode. Verified rather than assumed: chmod
-    // through a link moved a 0700 target to 1777 and left the link a link.
-    let plantedParent = false;
-    try {
-      plantedParent = !lstatSync(parent).isDirectory();
-    } catch {
-      /* absent — the normal first-spawn case, mkdir below creates it */
-    }
-    if (plantedParent) {
-      log.warn("cwd-policy", "something other than a directory holds the scratch parent; no scratch allowance", { parent });
-      return null;
-    }
-    mkdirSync(parent, { recursive: true });
-    // mkdir's mode argument is masked by umask, so set the bits we mean directly.
-    chmodSync(parent, 0o1777);
+    rmSync(legacy, { recursive: true, force: true });
+    log.info("cwd-policy", "removed the legacy /tmp scratch root", { legacy });
   } catch (err) {
-    // Wrong-owner parent, read-only /tmp: the session may still manage on its own,
-    // so warn and let scratchIfSafe have the final word.
-    log.warn("cwd-policy", "could not prepare the scratch parent dir", { parent, err: String(err) });
+    log.warn("cwd-policy", "could not remove the legacy /tmp scratch root", { legacy, err: String(err) });
   }
-  const safe = scratchIfSafe(dir);
-  if (!safe) log.warn("cwd-policy", "scratch path is not usable; no scratch allowance", { dir });
-  return safe;
 }
 
 /**
@@ -213,7 +142,7 @@ export function ensureSessionScratch(sessionId: string): string | null {
  * whose unresolved tail contains ".." all return false (i.e. "outside"), so a
  * path we can't reason about escalates to a prompt rather than sliding through.
  */
-export function isPathWithinCwd(cwd: string, target: string, scratch?: string | null): boolean {
+export function isPathWithinCwd(cwd: string, target: string): boolean {
   if (typeof target !== "string" || target.length === 0 || target.includes("\0")) return false;
   if (typeof cwd !== "string" || cwd.length === 0) return false;
 
@@ -235,22 +164,11 @@ export function isPathWithinCwd(cwd: string, target: string, scratch?: string | 
   const realTarget = canonicalizeDeepest(abs);
   if (realTarget === null) return false;
 
-  // An unresolvable cwd is still "outside" for the cwd test — the fail-closed
-  // behaviour this function has always had — but it must not shadow the scratch
-  // test below, which does not depend on the cwd at all. Nesting them cost the
-  // scratch allowance entirely whenever a cwd could not be canonicalized.
+  // Fail closed on an unresolvable cwd, as this has always done. The session's
+  // scratch dir needs no separate case: sessionTmpDir() is inside the cwd, so it is
+  // covered by the same comparison, which is the reason it moved there.
   const realCwd = canonicalize(cwd);
-  if (realCwd !== null && within(realTarget, realCwd)) return true;
-
-  // The session's own scratch dir counts as inside. Resolved the same way (so a
-  // symlink out of it does not pass), vetted by scratchIfSafe (so a symlink AT it
-  // does not either), and only when the caller supplies one — a slot-less call has
-  // no session, and therefore no scratch.
-  if (scratch) {
-    const realScratch = scratchIfSafe(scratch);
-    if (realScratch !== null && within(realTarget, realScratch)) return true;
-  }
-  return false;
+  return realCwd !== null && within(realTarget, realCwd);
 }
 
 function within(target: string, root: string): boolean {

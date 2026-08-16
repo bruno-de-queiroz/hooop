@@ -3,7 +3,6 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isGitPush, isGitCommand, peerBashAllowed, isCriticalBash, isCriticalTool, setMcpLookupForTests } from "./peer-policy";
-import { sessionScratchDir } from "./cwd-policy";
 
 describe("isGitPush", () => {
   it("catches git push in common forms", () => {
@@ -37,8 +36,28 @@ describe("isGitCommand", () => {
 });
 
 describe("peerBashAllowed", () => {
-  it("blocks git push", () => {
+  it("blocks ANY git, not only push", () => {
+    // `git status` used to be allowed here. Narrowing to push was the wrong shape:
+    // `git remote set-url`, `git config credential.helper`, a repo-controlled
+    // `core.pager` and `git bundle` all reach the same places without the word
+    // "push" in them.
     expect(peerBashAllowed("git push origin main").ok).toBe(false);
+    expect(peerBashAllowed("git status").ok).toBe(false);
+    expect(peerBashAllowed("git config credential.helper store").ok).toBe(false);
+    expect(peerBashAllowed("git remote set-url origin git@evil:x").ok).toBe(false);
+  });
+
+  it("blocks running a string the peer constructed", () => {
+    // The bypass for every other rule in the file: none of these contain `rm -rf`
+    // or `git push` as text, and all three can be either.
+    expect(peerBashAllowed("eval \"$(printf '\\x72\\x6d -rf .')\"").ok).toBe(false);
+    expect(peerBashAllowed("sh -c 'git push'").ok).toBe(false);
+    expect(peerBashAllowed("bash -lc 'cat ~/.config/gh/hosts.yml'").ok).toBe(false);
+    expect(peerBashAllowed("source ./setup.sh").ok).toBe(false);
+    expect(peerBashAllowed(". ./setup.sh").ok).toBe(false);
+    // Not a closed set, and the tests should not pretend otherwise: `$(…)` and an
+    // npm script are the same capability and stay allowed by choice.
+    expect(peerBashAllowed("npm run build").ok).toBe(true);
   });
 
   it("blocks reads of secret/token files", () => {
@@ -49,6 +68,17 @@ describe("peerBashAllowed", () => {
     expect(peerBashAllowed("cat ~/.aws/credentials").ok).toBe(false);
     expect(peerBashAllowed("cat .env.local").ok).toBe(false);
     expect(peerBashAllowed("cat $HOME/.claude/hooop/hook.token").ok).toBe(false);
+    // Found by open()-probing a live session rather than by reading the list: these
+    // exist, are readable by the model's uid, and sit INSIDE Landlock's read-only
+    // allow-list, so no kernel rule was ever going to stop them.
+    expect(peerBashAllowed("cat /home/agent/.config/gh/hosts.yml").ok).toBe(false);
+    expect(peerBashAllowed("cat ~/.gitconfig").ok).toBe(false);
+    expect(peerBashAllowed("cat ~/.netrc").ok).toBe(false);
+    expect(peerBashAllowed("cat ~/.npmrc").ok).toBe(false);
+    expect(peerBashAllowed("cat ~/.docker/config.json").ok).toBe(false);
+    // An environment dump that says neither "env" nor "printenv".
+    expect(peerBashAllowed("cat /proc/self/environ").ok).toBe(false);
+    expect(peerBashAllowed("tr '\\0' '\\n' < /proc/1/environ").ok).toBe(false);
   });
 
   it("blocks environment dumps that could leak tokens", () => {
@@ -60,7 +90,6 @@ describe("peerBashAllowed", () => {
 
   it("allows ordinary safe commands", () => {
     expect(peerBashAllowed("ls -la").ok).toBe(true);
-    expect(peerBashAllowed("git status").ok).toBe(true);
     expect(peerBashAllowed("npm test").ok).toBe(true);
     expect(peerBashAllowed("cat src/index.ts").ok).toBe(true);
     expect(peerBashAllowed("grep -r foo .").ok).toBe(true);
@@ -333,35 +362,117 @@ describe("isCriticalTool — MCP writes decided by transport, not by name", () =
   });
 });
 
-describe("isCriticalTool — the session's own scratch counts as inside", () => {
+describe("isCriticalTool — the session's own ./tmp is just inside the workdir", () => {
   // Measured: 30 of 72 cards in one auto-mode session were the agent writing
-  // screenshots to /tmp and reading them back. Its own output, escalating to a human
-  // every time. Per-session rather than a blanket /tmp, because every session in an
-  // install shares one container and containment is what keeps them apart.
-  const cwd = "/workspace/session-a";
-  const scratch = sessionScratchDir("9e3bf607-1496-40bf-882f-12766d4e8a5c")!;
+  // screenshots somewhere temporary and reading them back. The fix is a habit fix —
+  // the steer names `./tmp` — and it needs no policy of its own, because a path
+  // inside the workdir was always routine. The blessed `/tmp/hooop-session/<id>`
+  // this replaces cost three symlink bugs to defend and did not cover Bash at all.
+  const cwd = process.cwd();
 
   it("reads and writes inside it are routine", () => {
-    expect(isCriticalTool("Read", { file_path: `${scratch}/shot.png` }, cwd, scratch)).toBe(false);
-    expect(isCriticalTool("Write", { file_path: `${scratch}/run.mjs` }, cwd, scratch)).toBe(false);
+    expect(isCriticalTool("Read", { file_path: join(cwd, "tmp", "shot.png") }, cwd)).toBe(false);
+    expect(isCriticalTool("Write", { file_path: join(cwd, "tmp", "run.mjs") }, cwd)).toBe(false);
   });
 
-  it("bare /tmp is still outside — one session must not read another's scratch", () => {
-    expect(isCriticalTool("Read", { file_path: "/tmp/mobilecheck/shot.png" }, cwd, scratch)).toBe(true);
-    const other = sessionScratchDir("00000000-1111-2222-3333-444444444444")!;
-    expect(isCriticalTool("Read", { file_path: `${other}/shot.png` }, cwd, scratch)).toBe(true);
+  it("the shared /tmp is still outside, and so is another session's tree", () => {
+    expect(isCriticalTool("Read", { file_path: "/tmp/mobilecheck/shot.png" }, cwd)).toBe(true);
+    expect(isCriticalTool("Read", { file_path: "/tmp/hooop-session/other/shot.png" }, cwd)).toBe(true);
+    expect(isCriticalTool("Read", { file_path: "/home/agent/workspace/sessions/other/tmp/x" }, cwd)).toBe(true);
+  });
+});
+
+describe("isCriticalTool — MCP writes decided by transport, not by name", () => {
+  // The rule's own comment always described a FALLBACK ("a heuristic on the action
+  // segment", "with no path argument we recognise"). The code tested the verb
+  // against `<server>__<action>` and returned true regardless of any path, so a
+  // Serena `replace_content` on a file inside the workdir outranked a native `Edit`
+  // on the same file. Harmless while a false positive cost one extra card; once a
+  // critical ask became host-only — with trust and auto mode both excluding the
+  // critical set — it meant a guest co-driving a Serena session pinged the host on
+  // every edit, with no way out.
+  let cwd: string;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "mcp-policy-"));
+    setMcpLookupForTests(() => [
+      { name: "serena", type: "stdio" },                                  // in-container
+      { name: "mcp-search", type: "stdio", plugin: "claude-mem" },        // in-container, plugin
+      { name: "Gmail", type: "http" },                                    // acts on an account
+    ]);
   });
 
-  it("is not granted when the caller passes none", () => {
-    expect(isCriticalTool("Read", { file_path: `${scratch}/shot.png` }, cwd)).toBe(true);
+  afterEach(() => {
+    setMcpLookupForTests(null);
+    rmSync(cwd, { recursive: true, force: true });
   });
 
-  it("refuses to build a path from an id that isn't plainly one", () => {
-    // The id becomes a filesystem path that grants relaxed access, so a crafted one
-    // must not widen the boundary.
-    expect(sessionScratchDir("../../etc")).toBeNull();
-    expect(sessionScratchDir("/absolute")).toBeNull();
-    expect(sessionScratchDir("a/b")).toBeNull();
-    expect(sessionScratchDir("short")).toBeNull();
+  it("treats a contained write by an in-container server as routine, like native Edit", () => {
+    const inside = join(cwd, "src.ts");
+    expect(isCriticalTool("Edit", { file_path: inside }, cwd)).toBe(false);
+    expect(isCriticalTool("mcp__serena__replace_content", { relative_path: inside }, cwd)).toBe(false);
+    expect(isCriticalTool("mcp__serena__insert_after_symbol", { relative_path: "src.ts" }, cwd)).toBe(false);
+  });
+
+  it("still escalates when the path escapes the workdir", () => {
+    expect(isCriticalTool("mcp__serena__replace_content", { relative_path: "/etc/hosts" }, cwd)).toBe(true);
+  });
+
+  it("still escalates a mutation with NO path to check — the original case", () => {
+    // browser_evaluate, write_memory: nothing to contain, so the name is all we have.
+    expect(isCriticalTool("mcp__serena__write_memory", { content: "x" }, cwd)).toBe(true);
+    expect(isCriticalTool("mcp__playwright__browser_evaluate", { function: "() => 1" }, cwd)).toBe(true);
+  });
+
+  it("still escalates when there is no cwd to contain against", () => {
+    expect(isCriticalTool("mcp__serena__replace_content", { relative_path: "src.ts" }, null)).toBe(true);
+  });
+
+  it("ALWAYS escalates a server that acts outside this container", () => {
+    // A path argument to a remote server is a claim about somebody else's storage,
+    // not a boundary we can check.
+    expect(isCriticalTool("mcp__Gmail__send_message", { path: join(cwd, "draft.txt") }, cwd)).toBe(true);
+  });
+
+  it("escalates a server it cannot place, rather than assuming local", () => {
+    // Fail closed: an unreadable config or an unmappable name keeps the old, stricter
+    // behaviour instead of quietly relaxing.
+    expect(isCriticalTool("mcp__unknown-thing__write_file", { path: join(cwd, "a") }, cwd)).toBe(true);
+  });
+
+  it("does not let a local plugin server vouch for a remote one of the same name", () => {
+    // A plugin's server only ever appears in tool names as `plugin_<plugin>_<name>`,
+    // so registering its bare name too would make the local `github` answer for the
+    // REMOTE `github` — whose writes would stop asking, on the strength of a name
+    // collision between two different scopes.
+    setMcpLookupForTests(() => [
+      { name: "github", type: "stdio", plugin: "some-plugin" }, // in-container
+      { name: "github", type: "http" },                        // acts on the real repo
+    ]);
+    expect(isCriticalTool("mcp__github__create_or_update_file", { path: join(cwd, "a.ts") }, cwd)).toBe(true);
+    // The plugin one, under the name it actually uses, stays routine.
+    expect(
+      isCriticalTool("mcp__plugin_some-plugin_github__create_or_update_file", { path: join(cwd, "a.ts") }, cwd),
+    ).toBe(false);
+  });
+
+  it("resolves a plugin server under its namespaced tool name", () => {
+    expect(
+      isCriticalTool("mcp__plugin_claude-mem_mcp-search__build_corpus", { path: join(cwd, "c") }, cwd),
+    ).toBe(false);
+  });
+
+  it("matches the verb on the ACTION, never on the server name", () => {
+    // Against `<server>__<action>` a server called `gdrive-writer` or `run-tools`
+    // made every one of its tools critical, reads included.
+    // No path in either input, so containment cannot be what decides it and the
+    // verb match is isolated: before, "run" in the SERVER name made both critical.
+    setMcpLookupForTests(() => [{ name: "run-tools", type: "stdio" }]);
+    expect(isCriticalTool("mcp__run-tools__list_items", { query: "x" }, cwd)).toBe(false);
+    expect(isCriticalTool("mcp__run-tools__delete_item", { id: "x" }, cwd)).toBe(true);
+  });
+
+  it("a secret path outranks everything", () => {
+    expect(isCriticalTool("mcp__serena__replace_content", { relative_path: "~/.ssh/authorized_keys" }, cwd)).toBe(true);
   });
 });

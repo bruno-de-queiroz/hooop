@@ -107,6 +107,22 @@ const SECRET_PATTERNS: RegExp[] = [
   /(^|[\s\/'"~])\.ssh(\/|\b)/i, // ~/.ssh, .ssh/, /home/agent/.ssh
   /(^|[\s\/'"~])\.aws(\/|\b)/i,
   /(^|[\s\/'"~])\.env(\.|\b)/i,
+  // Everything below was reachable with no card until an open() probe on a live
+  // session showed which of these actually exist and are readable by the model's
+  // uid. The gh one is the sharp one: `hooop setup` signs the sandbox in to the
+  // OPERATOR's GitHub account, so that file is a host credential sitting inside
+  // Landlock's read-only allow-list, where no kernel rule will stop a read of it.
+  /(^|[\s\/'"~])\.config\/gh(\/|\b)/i,
+  /(^|[\s\/'"~])\.gitconfig\b/i,
+  /(^|[\s\/'"~])\.git-credentials\b/i,
+  /(^|[\s\/'"~])\.netrc\b/i,
+  /(^|[\s\/'"~])\.npmrc\b/i,
+  /(^|[\s\/'"~])\.docker\/config\.json/i,
+  /(^|[\s\/'"~])\.kube(\/|\b)/i,
+  /(^|[\s\/'"~])\.config\/gcloud(\/|\b)/i,
+  // `cat /proc/self/environ` read the whole environment while saying neither
+  // "env" nor "printenv", so it walked around ENV_DUMP_PATTERNS entirely.
+  /\/proc\/(self|\d+|\$\$|\*)\/environ/i,
 ];
 
 // Bare environment dumps leak any token that lives in the process env.
@@ -115,6 +131,24 @@ const SECRET_PATTERNS: RegExp[] = [
 const ENV_DUMP_PATTERNS: RegExp[] = [
   /(^|[;&|]\s*)printenv\b/i,
   /(^|[;&|]\s*)env\s*($|[|>])/i,
+];
+
+// Ways to run a string the peer constructed, which is how every other rule in
+// this file gets spelled around: `eval "$(printf '\\x72\\x6d -rf .')"` is `rm -rf`
+// that matches no destructive pattern, and `sh -c` is the same trick with a
+// different name. Forbidden for a peer rather than escalated, because there is no
+// version of "approve this constructed string" a host can meaningfully read.
+//
+// NOT a closed set, and it cannot be: `$(…)`, backticks and an npm script in the
+// repo are the same capability under different spellings, and those stay allowed
+// on purpose (they are too common in ordinary commands to block). What bounds
+// those is capability, not text — see the note on SECRET_PATTERNS about the gh
+// token, which no kernel rule stops.
+const CONSTRUCTED_EXEC_PATTERNS: RegExp[] = [
+  /\beval\b/i,
+  /\bsource\s/i,
+  /(^|[;&|]\s*)\.\s+\S/,                    // `. ./script`
+  /\b(ba|z|k|da)?sh\s+(-[a-z]*\s+)*-c\b/i,   // sh -c, bash -lc, zsh -c
 ];
 
 // Irreversible / high-blast-radius commands. In auto mode — and on the `!bash`
@@ -150,8 +184,17 @@ export interface PolicyResult {
  * checked (the host already has full shell + the dashboard token).
  */
 export function peerBashAllowed(command: string): PolicyResult {
-  if (isGitPush(command)) {
-    return { ok: false, reason: "git push is host-only in a shared session" };
+  // ANY git, not just push. Narrowing this to push was the wrong shape: `git
+  // remote set-url`, `git config credential.helper`, a `core.pager` that runs a
+  // command, `git bundle` — the ways to push or to leak through git are not a
+  // subcommand list. isGitCommand already carries that argument for auto mode.
+  if (isGitCommand(command)) {
+    return { ok: false, reason: "git is host-only in a shared session" };
+  }
+  for (const re of CONSTRUCTED_EXEC_PATTERNS) {
+    if (re.test(command)) {
+      return { ok: false, reason: "running a constructed string (eval, sh -c, source) is host-only in a shared session" };
+    }
   }
   for (const re of SECRET_PATTERNS) {
     if (re.test(command)) {
@@ -277,10 +320,6 @@ export function isCriticalTool(
   toolName: string,
   input: unknown,
   cwd?: string | null,
-  /** The session's own scratch dir (see sessionScratchDir). Counts as inside the
-   *  boundary: it is the agent's own output, and it is per-session so one session
-   *  still cannot read another's. */
-  scratch?: string | null,
 ): boolean {
   if (toolName === "Bash") {
     const cmd = (input as { command?: unknown } | null)?.command;
@@ -309,7 +348,7 @@ export function isCriticalTool(
     // on a missing cwd; native tools now do the same.
     if (!cwd) return true;
     for (const target of paths) {
-      if (!isPathWithinCwd(cwd, target, scratch)) return true;
+      if (!isPathWithinCwd(cwd, target)) return true;
     }
   }
 

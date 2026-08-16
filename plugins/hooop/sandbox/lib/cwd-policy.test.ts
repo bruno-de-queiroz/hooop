@@ -1,15 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import {
-  mkdtempSync,
-  rmdirSync,
-  symlinkSync,
-  mkdirSync,
-  rmSync,
-  statSync,
-  existsSync,
-  chmodSync,
-  unlinkSync,
-} from "node:fs";
+import { mkdtempSync, rmdirSync, symlinkSync, mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,8 +7,8 @@ import {
   isCwdAllowed,
   canonicalize,
   isPathWithinCwd,
-  sessionScratchDir,
-  ensureSessionScratch,
+  sessionTmpDir,
+  removeLegacyScratchRoot,
 } from "./cwd-policy";
 
 const originalEnv = process.env.HOOOP_CWD_ROOTS;
@@ -244,106 +234,45 @@ describe("isCwdAllowed — symlink and canonicalization security", () => {
   });
 });
 
-describe("a scratch dir someone else planted", () => {
-  // /tmp is world-writable and every session in an install shares one container
-  // under one uid, so a session's blessed scratch path is a path OTHER sessions can
-  // write. These use real symlinks on disk rather than mocks, because the whole
-  // question is what the filesystem does.
-  const ids: string[] = [];
-  const freshId = (n: string) => {
-    // A plain-looking session id (sessionScratchDir rejects anything else) that no
-    // real session will collide with.
-    const id = `aaaaaaaa-test-${n}-0000-000000000000`;
-    ids.push(id);
-    return id;
-  };
-
-  afterEach(() => {
-    for (const id of ids.splice(0)) {
-      try { rmSync(sessionScratchDir(id)!, { recursive: true, force: true }); } catch { /* gone */ }
-    }
+describe("the session's scratch dir is just inside the cwd", () => {
+  // Everything this file used to assert about a blessed /tmp path is gone with the
+  // path: leaf symlinks, parent symlinks, chmod-through-a-link, unresolved
+  // comparisons, a shared 1777 parent. `<cwd>/tmp` needs none of it, which was the
+  // reason for moving it — three of those bugs were one question in three syscalls.
+  it("is inside the cwd, so containment already covers it", () => {
+    const root = makeTmpRoot();
+    const cwd = join(root, "work");
+    mkdirSync(cwd, { recursive: true });
+    const tmp = sessionTmpDir(cwd);
+    expect(tmp).toBe(join(cwd, "tmp"));
+    expect(isPathWithinCwd(cwd, tmp)).toBe(true);
+    expect(isPathWithinCwd(cwd, join(tmp, "shot.png"))).toBe(true);
   });
 
-  it("does not count a symlink at the scratch path as inside it", () => {
-    // The attack: plant `ln -s /home/agent/.claude/projects /tmp/hooop-session/<victim>`
-    // before the victim first uses its scratch. Without the lstat check the victim's
-    // reads "inside its own scratch" resolve into another session's transcripts and
-    // are auto-approved, because we told the gate that directory was contained.
-    const id = freshId("symlk");
-    const scratch = sessionScratchDir(id)!;
-    const elsewhere = mkdtempSync(join(tmpdir(), "hooop-elsewhere-"));
-    mkdirSync(join(scratch, ".."), { recursive: true });
-    symlinkSync(elsewhere, scratch);
+  it("does not bless the shared /tmp, nor another session's tree", () => {
+    const root = makeTmpRoot();
+    const cwd = join(root, "work");
+    mkdirSync(cwd, { recursive: true });
+    expect(isPathWithinCwd(cwd, "/tmp/shot.png")).toBe(false);
+    expect(isPathWithinCwd(cwd, join(root, "other-session", "tmp", "shot.png"))).toBe(false);
+  });
+});
 
-    expect(isPathWithinCwd("/workspace/s", `${scratch}/loot.txt`, scratch)).toBe(false);
-    // Reached by its real name it is simply outside, as any other path would be.
-    expect(isPathWithinCwd("/workspace/s", `${elsewhere}/loot.txt`, scratch)).toBe(false);
-    rmSync(elsewhere, { recursive: true, force: true });
+describe("removeLegacyScratchRoot", () => {
+  // The model's uid cannot delete /tmp/hooop-session (sticky /tmp, and the entry
+  // belongs to the server), so an upgraded install keeps last version's scratch —
+  // and whatever the agent wrote in it — in a world-writable directory until the
+  // server clears it.
+  it("is a no-op when there is nothing there", () => {
+    expect(() => removeLegacyScratchRoot()).not.toThrow();
   });
 
-  it("counts a real directory at the scratch path as inside it", () => {
-    const id = freshId("realdi");
-    const scratch = ensureSessionScratch(id);
-    expect(scratch).toBe(sessionScratchDir(id));
-    expect(isPathWithinCwd("/workspace/s", `${scratch}/shot.png`, scratch!)).toBe(true);
-  });
-
-  it("still blesses a scratch dir that does not exist yet", () => {
-    // The first write into a fresh scratch dir, before anything created it.
-    const scratch = sessionScratchDir(freshId("absent"))!;
-    expect(isPathWithinCwd("/workspace/s", `${scratch}/first.txt`, scratch)).toBe(true);
-  });
-
-  it("grants no scratch allowance at all when the path is poisoned", () => {
-    // ensureSessionScratch returning null is what keeps the system prompt from
-    // steering the agent at a directory that is not its own.
-    const id = freshId("poisn");
-    const scratch = sessionScratchDir(id)!;
-    const elsewhere = mkdtempSync(join(tmpdir(), "hooop-elsewhere-"));
-    mkdirSync(join(scratch, ".."), { recursive: true });
-    symlinkSync(elsewhere, scratch);
-
-    expect(ensureSessionScratch(id)).toBeNull();
-    rmSync(elsewhere, { recursive: true, force: true });
-  });
-
-  it("will not chmod through a symlink planted at the scratch PARENT", () => {
-    // mkdir -p succeeds on a symlink-to-directory and chmod follows it, so without
-    // the lstat this hands the attacker a chmod of their chosen target — and this
-    // process owns ~/.claude and /var/run/hooop (0750, the socket's only real lock).
-    const parent = "/tmp/hooop-session";
-    try {
-      rmdirSync(parent); // only succeeds when empty, which is the state tests leave
-    } catch {
-      // A real install owns it (root/hooopd, or live sessions inside). Planting a
-      // symlink over that would be worse than skipping the assertion.
-      return;
-    }
-    const victim = mkdtempSync(join(tmpdir(), "hooop-victim-"));
-    chmodSync(victim, 0o700);
-    symlinkSync(victim, parent);
-    try {
-      expect(ensureSessionScratch(freshId("plink"))).toBeNull();
-      expect(statSync(victim).mode & 0o7777).toBe(0o700); // NOT widened to 1777
-    } finally {
-      unlinkSync(parent);
-      rmSync(victim, { recursive: true, force: true });
-    }
-  });
-
-  it("leaves the leaf to the session and makes the parent writable by it", () => {
-    // This process runs as the server user; a session's claude runs as `agent`.
-    // Caught live: creating the leaf here as 0700 left the parent hooopd-owned and
-    // 0700, and the session got `mkdir: Permission denied` on its own scratch dir.
-    const id = freshId("parent");
-    const dir = ensureSessionScratch(id)!;
-    expect(dir).toBe(sessionScratchDir(id));
-    // The parent is prepared, writable + sticky like /tmp, so any session uid can
-    // create its own leaf and only its owner can remove it.
-    const parentMode = statSync(join(dir, "..")).mode;
-    expect(parentMode & 0o777).toBe(0o777);
-    expect(parentMode & 0o1000).toBe(0o1000); // sticky
-    // The leaf itself is NOT created here.
-    expect(existsSync(dir)).toBe(false);
+  it("removes the directory and everything under it", () => {
+    const legacy = "/tmp/hooop-session";
+    if (existsSync(legacy)) return; // a real install owns it; don't touch
+    mkdirSync(join(legacy, "some-old-session"), { recursive: true });
+    writeFileSync(join(legacy, "some-old-session", "leftover.txt"), "x");
+    removeLegacyScratchRoot();
+    expect(existsSync(legacy)).toBe(false);
   });
 });

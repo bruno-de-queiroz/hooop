@@ -114,6 +114,10 @@ vi.mock("./lib/events-query", () => ({ listEvents: () => [], getEvent: () => und
 vi.mock("./lib/cwd-policy", () => ({
   isAllowedCwd: () => ({ ok: true }),
   canonicalize: (p: string) => p,
+  // The bash lane points $TMPDIR at the session's own ./tmp, so this mock has to
+  // carry it too: a missing export here surfaced as every bash test timing out
+  // waiting for a 'done' snapshot, because the route threw before emitting one.
+  sessionTmpDir: (cwd: string) => `${cwd}/tmp`,
 }));
 vi.mock("./lib/db", () => ({ backupEventsDb: vi.fn(), checkpointDb: vi.fn() }));
 vi.mock("./rate-limit", () => ({
