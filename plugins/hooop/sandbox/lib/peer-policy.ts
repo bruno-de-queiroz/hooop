@@ -95,6 +95,92 @@ export function isGitCommand(command: string): boolean {
   return /\bgit\b/i.test(command);
 }
 
+/**
+ * A Bash command with its heredoc BODIES removed, so patterns match the command and
+ * not the data it carries.
+ *
+ * Why this exists: a session writing a landing page about hooop's own gating became
+ * unusable. The page copy contains the words "git push" and "rm -rf", the model
+ * edits files with `python3 - <<\'PY\'`, and every paragraph therefore looked like a
+ * dangerous command and raised a host card. Seventeen cards in one sitting, all of
+ * them prose.
+ *
+ * It also makes the rules CONSISTENT. `pathArgsOf` never looked at a Write's
+ * `content`, so writing a script with Write and running it was always routine while
+ * the same script in a heredoc was inspected. Two spellings of one action should not
+ * get two answers. The honest description of the denylist is that it reads the
+ * command, not the payload — and Landlock, not this, is what bounds what the payload
+ * can do once it runs.
+ */
+export function withoutHeredocBodies(command: string): string {
+  const lines = command.split("\n");
+  const out: string[] = [];
+  let terminator: string | null = null;
+  let dashed = false;
+  for (const line of lines) {
+    if (terminator !== null) {
+      const probe = dashed ? line.replace(/^[\t ]+/, "") : line;
+      if (probe.trim() === terminator) {
+        out.push(line);
+        terminator = null;
+      }
+      continue; // body dropped
+    }
+    out.push(line);
+    const m = /<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.exec(line);
+    if (m) {
+      dashed = m[1] === "-";
+      terminator = m[3];
+    }
+  }
+  return out.join("\n");
+}
+
+/** Git subcommands that PUBLISH, RECONFIGURE, or DESTROY history/work. */
+const GIT_CRITICAL_SUB = new Set([
+  // publishes to somewhere else
+  "push", "send-email", "request-pull",
+  // reconfigures the repo, including hooks and credential helpers
+  "config", "credential", "remote", "submodule",
+  // destroys history or uncommitted work
+  "reset", "rebase", "filter-branch", "filter-repo", "gc", "prune", "reflog", "clean",
+]);
+
+/**
+ * A `git` invocation that warrants a host prompt, as opposed to any mention of git.
+ *
+ * This used to be "any git at all", on the argument that even `git log` can run
+ * arbitrary code through repo-controlled config (`core.pager`, a `textconv` filter,
+ * `--upload-pack`). The argument is true and the conclusion was still wrong: the
+ * model can run arbitrary code with `node -e` or an npm script without touching git,
+ * so gating `git status` buys nothing against code execution — Landlock is what
+ * bounds that — while costing a card on every `git status`, `git add`, `git commit`
+ * and `git check-ignore`. Measured on this install: 141 of 533 Bash calls invoke git
+ * and only 16 of those touch the network.
+ *
+ * So the line is drawn at what is irreversible or outward-facing instead: publishing,
+ * reconfiguring, and destroying work. The explicit code-injection flags stay critical
+ * because they have no innocent use, and `-c` is allowed only for the identity keys
+ * the model legitimately passes to `commit`.
+ */
+export function isCriticalGit(command: string): boolean {
+  const code = withoutHeredocBodies(command);
+  const re = /(?:^|[\n;&|(]\s*|&&\s*|\|\|\s*)(?:\w+=\S*\s+)*git\b([^\n;&|]*)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(code)) !== null) {
+    const rest = m[1] ?? "";
+    if (/--(?:upload|receive)-pack\b|--exec\b/i.test(rest)) return true;
+    for (const raw of rest.match(/-c\s+[A-Za-z0-9._-]+\s*=/g) ?? []) {
+      const key = raw.replace(/^-c\s+/, "").replace(/\s*=$/, "").toLowerCase();
+      if (key !== "user.name" && key !== "user.email") return true;
+    }
+    // Skip global options (-C dir, -c k=v, --no-pager, …) to reach the subcommand.
+    const sub = /^(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z][\w-]*(?:=\S*)?))*\s+([a-z][a-z-]*)/.exec(rest);
+    if (sub && GIT_CRITICAL_SUB.has(sub[1].toLowerCase())) return true;
+  }
+  return false;
+}
+
 // Paths whose contents are secrets/tokens the host doesn't want a peer reading.
 // Mirrors the philosophy of the user's settings.json deny-list, extended for
 // the direct-exec lane.
@@ -150,14 +236,19 @@ const CONSTRUCTED_EXEC_PATTERNS: RegExp[] = [
   // recourse at all: the host cannot approve it either, so a false positive here is
   // worse than one on a card. Same reasoning ENV_DUMP_PATTERNS already uses to allow
   // `env FOO=bar cmd` while blocking a bare `env`.
-  /(^|[;&|(]\s*|&&\s*|\|\|\s*)eval\b/i,
-  /(^|[;&|(]\s*|&&\s*|\|\|\s*)source\s/i,
-  /(^|[;&|]\s*)\.\s+\S/,                    // `. ./script`
+  /(^|[\n;&|(]\s*|&&\s*|\|\|\s*)eval\b/i,
+  /(^|[\n;&|(]\s*|&&\s*|\|\|\s*)source\s/i,
+  /(^|[\n;&|]\s*)\.\s+\S/,                    // `. ./script`
   /\b(ba|z|k|da)?sh\s+(-[a-z]*\s+)*-c\b/i,   // sh -c, bash -lc, zsh -c
 ];
 
 /**
  * A `git` INVOCATION, as opposed to the word "git" appearing anywhere.
+ *
+ * A newline counts as a separator alongside `;`, `&&` and `|`. Leaving it out was a
+ * hole: every command in the session that exposed all this is multi-line, with `cd`
+ * on the first line and git on the third, and `^` without the m flag only matches the
+ * start of the whole string.
  *
  * Used only for the peer refusal, where isGitCommand's "any mention" cost too much:
  * it refused `grep -rn git README.md` and `ls git-hooks/` outright, with no way for
@@ -172,7 +263,7 @@ const CONSTRUCTED_EXEC_PATTERNS: RegExp[] = [
  * unattended either way.
  */
 function isGitInvocation(command: string): boolean {
-  return /(^|[;&|(]\s*|&&\s*|\|\|\s*)(\w+=\S*\s+)*git\b/i.test(command);
+  return /(^|[\n;&|(]\s*|&&\s*|\|\|\s*)(\w+=\S*\s+)*git\b/i.test(command);
 }
 
 // Irreversible / high-blast-radius commands. In auto mode — and on the `!bash`
@@ -207,7 +298,10 @@ export interface PolicyResult {
  * Whether a peer may run this `!bash` command directly. Host commands are never
  * checked (the host already has full shell + the dashboard token).
  */
-export function peerBashAllowed(command: string): PolicyResult {
+export function peerBashAllowed(rawCommand: string): PolicyResult {
+  // Same reasoning as isCriticalBash: a guest writing a paragraph that mentions git
+  // is not invoking git, and a refusal has no recourse at all.
+  const command = withoutHeredocBodies(rawCommand);
   // ANY git, not just push. Narrowing this to push was the wrong shape: `git
   // remote set-url`, `git config credential.helper`, a `core.pager` that runs a
   // command, `git bundle` — the ways to push or to leak through git are not a
@@ -245,10 +339,13 @@ export function peerBashAllowed(command: string): PolicyResult {
  * definition of dangerous.
  */
 export function isCriticalBash(command: string): boolean {
-  if (isGitCommand(command)) return true;
-  for (const re of SECRET_PATTERNS) if (re.test(command)) return true;
-  for (const re of ENV_DUMP_PATTERNS) if (re.test(command)) return true;
-  for (const re of DESTRUCTIVE_PATTERNS) if (re.test(command)) return true;
+  // The command, not the data it carries — see withoutHeredocBodies. A session
+  // writing prose about `git push` and `rm -rf` raised a card per paragraph.
+  const code = withoutHeredocBodies(command);
+  if (isCriticalGit(code)) return true;
+  for (const re of SECRET_PATTERNS) if (re.test(code)) return true;
+  for (const re of ENV_DUMP_PATTERNS) if (re.test(code)) return true;
+  for (const re of DESTRUCTIVE_PATTERNS) if (re.test(code)) return true;
   return false;
 }
 

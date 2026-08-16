@@ -61,9 +61,12 @@ describe("peerBashAllowed", () => {
     expect(peerBashAllowed("cat eval-results.md").ok).toBe(true);
     expect(peerBashAllowed("grep -rn source src/").ok).toBe(true);
     expect(peerBashAllowed("npm run eval").ok).toBe(true);
-    // And what they miss still escalates: isCriticalBash keeps the broad check, so
-    // a git invocation this lets through becomes a host card, never a silent run.
-    expect(isCriticalBash("xargs git push")).toBe(true);
+    // What both checks miss, stated rather than implied: git reached through another
+    // program (`echo origin | xargs git push`) is not in command position, so neither
+    // the refusal nor the critical set sees it. Same class as an npm script or
+    // `$(...)`, which are accepted bypasses — text rules cannot close it, only taking
+    // the credential out of the session\'s reach can.
+    expect(isCriticalBash("echo origin | xargs git push")).toBe(false);
   });
 
   it("blocks running a string the peer constructed", () => {
@@ -119,14 +122,43 @@ describe("peerBashAllowed", () => {
 });
 
 describe("isCriticalBash (auto-mode still-prompts set)", () => {
-  it("flags any git command, not just push", () => {
-    // Auto mode should keep asking for git regardless of subcommand — commit,
-    // status, log, and push are all in the "keep prompting" set.
+  it("flags git that publishes, reconfigures or destroys — not git that reads", () => {
+    // This asserted "any git at all", which cost a card on every status and commit.
+    // A real session went unusable on it: 141 of 533 Bash calls invoked git, only 16
+    // touched the network. The code-execution argument for gating `git log` does not
+    // hold, because `node -e` is right there and Landlock is what bounds it.
     expect(isCriticalBash("git push origin main")).toBe(true);
-    expect(isCriticalBash("git commit -m wip")).toBe(true);
-    expect(isCriticalBash("git status")).toBe(true);
+    expect(isCriticalBash("git remote set-url origin git@evil:x")).toBe(true);
+    expect(isCriticalBash("git config credential.helper store")).toBe(true);
     expect(isCriticalBash("git reset --hard HEAD~3")).toBe(true);
     expect(isCriticalBash("git clean -fd")).toBe(true);
+    expect(isCriticalBash("git -c core.pager=sh log")).toBe(true);
+    expect(isCriticalBash("git fetch --upload-pack=/tmp/x origin")).toBe(true);
+
+    expect(isCriticalBash("git status --short")).toBe(false);
+    expect(isCriticalBash("git add -A")).toBe(false);
+    expect(isCriticalBash("git log --oneline -3")).toBe(false);
+    expect(isCriticalBash("git check-ignore -v tmp")).toBe(false);
+    expect(isCriticalBash('git -c user.name="a" -c user.email="b" commit -F -')).toBe(false);
+  });
+
+  it("reads the command, not the prose it carries", () => {
+    // The bug that made a session unusable: it was writing landing-page copy ABOUT
+    // this gating with a python heredoc, so every paragraph containing "git push" or
+    // "rm -rf" raised a host card. Seventeen in one sitting, all of them prose.
+    const q = "'".repeat(3);
+    expect(isCriticalBash(`python3 - <<'PY'\nx = ${q}git push is refused outright${q}\nPY`)).toBe(false);
+    expect(isCriticalBash("cat <<'EOF' > page.md\nnever rm -rf your workdir\nEOF")).toBe(false);
+    // A newline is a command separator like `;` — every command in the session that
+    // exposed this was multi-line, with `cd` first and git three lines down, and `^`
+    // without the m flag only matches the start of the whole string.
+    expect(isCriticalBash("cd /work\nprintf x >> .gitignore\ngit push origin main")).toBe(true);
+    expect(peerBashAllowed("cd /work\ngit push origin main").ok).toBe(false);
+    expect(peerBashAllowed('cd /work\neval "$x"').ok).toBe(false);
+    expect(peerBashAllowed("cd /work\nsource ./s.sh").ok).toBe(false);
+    // The heredoc must not swallow what comes AFTER it.
+    expect(isCriticalBash("cat <<'EOF' > a.md\nhello\nEOF\ngit push")).toBe(true);
+    expect(isCriticalBash("cat <<'EOF' > a.md\nhello\nEOF\nrm -rf /workspace")).toBe(true);
   });
   it("flags secret/token reads and env dumps", () => {
     expect(isCriticalBash("cat ~/.ssh/id_ed25519")).toBe(true);

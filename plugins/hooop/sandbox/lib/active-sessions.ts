@@ -1542,19 +1542,17 @@ const PLAN_SYSTEM_PROMPT =
  * because their shells are confined to their own workdirs. $TMPDIR points there too,
  * so a tool that never read this prompt still lands in the right place.
  *
- * Strongly worded on purpose. It is the only thing standing between the model and
- * the shared /tmp, whose cross-session exposure is an accepted risk rather than a
- * closed one — see sessionTmpDir() for why narrowing /tmp itself was reverted.
+ * Deliberately SHORT. An earlier version opened with "ALL temporary files go in" and
+ * closed with "if a tool insists on an absolute path…", and a real session read that
+ * as a task: it edited .gitignore, ran `git check-ignore` to verify, and built a
+ * harness directory, all before starting the work it was asked to do. A habit is a
+ * sentence. The env vars are what actually enforce it.
  */
 const SCRATCH_SYSTEM_PROMPT =
-  "ALL temporary files go in `./tmp` (a `tmp` directory inside your working " +
-  "directory) — screenshots, one-off scripts, intermediate output, anything you " +
-  "intend to delete straight after. It already exists and $TMPDIR points at it. " +
-  "Never use /tmp, /var/tmp or any absolute path outside your working directory " +
-  "for scratch: /tmp is shared with every other session in this container, so " +
-  "writing there both leaks your output to them and interrupts the human for " +
-  "approval on every read back. If a tool insists on an absolute path, use the " +
-  "absolute path of `./tmp` instead.";
+  "Put temporary files in `./tmp` inside your working directory: screenshots, " +
+  "one-off scripts, intermediate output. It already exists and $TMPDIR points at " +
+  "it. Absolute /tmp is shared with other sessions, so reading a file back from " +
+  "there interrupts the human for approval.";
 
 // The interactive tools headless mode lacks come from the bundled hooop MCP
 // server (see plugins/hooop/.mcp.json + mcp/tools-server.mjs). Claude namespaces
